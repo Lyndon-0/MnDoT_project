@@ -6,8 +6,8 @@ from datetime import datetime
 
 from mndot_api import load_detector_list, fetch_timeseries, rule_flags
 
-st.set_page_config(page_title="MnDOT Detector Monitor — I-94", layout="wide")
-st.title("MnDOT Detector Monitor — I-94")
+st.set_page_config(page_title="MnDOT Detector Monitor — I-94 MVP", layout="wide")
+st.title("MnDOT Detector Monitor — I-94 MVP")
 st.caption("Click a sensor on the map → fetch 30-sec data → aggregate to 5-min + basic rule checks (ready for MnDOT real-time API).")
 
 # ======================

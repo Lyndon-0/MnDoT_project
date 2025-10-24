@@ -1,0 +1,5 @@
+detector_id,name,route,direction,lat,lon,lane
+5838,Mainline sensor,I-94,EB,44.97255,-93.20471,1
+9575,Mainline sensor,I-94,EB,44.97211,-93.20318,1
+9600,Mainline sensor,I-94,WB,44.97233,-93.20530,1
+2642,Ramp sensor,I-94,EB,44.97302,-93.20190,OnRamp
