@@ -2,7 +2,7 @@ import streamlit as st, pandas as pd, altair as alt
 from streamlit_folium import st_folium
 import folium
 import numpy as np  
-from datetime import datetime  
+from datetime import datetime, time  
 
 from mndot_api import load_detector_list, fetch_timeseries, rule_flags
 
@@ -29,11 +29,11 @@ def agg_5min(df_30s: pd.DataFrame, value_col: str = "value") -> pd.DataFrame:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_heatmap_long(df_meta_subset: pd.DataFrame,
-                       date_str: str, start_hm: str, end_hm: str,
+                       start_dt: datetime, end_dt: datetime,
                        sensor_key: str, max_det: int = 40) -> pd.DataFrame:
     """
-    Build long-form table for time–space heatmap:
-    columns: ['time','order','detector_id','value'] where 'time' is 5min timestamp.
+    Build long-form table for time–space heatmap using a start/end window.
+    Columns: ['time','order','detector_id','value'] where 'time' is 5min timestamp.
     Ordering heuristic:
       - if 'order' column exists -> use it;
       - else choose the axis with larger spread (lon or lat) and sort by it.
@@ -60,7 +60,7 @@ def build_heatmap_long(df_meta_subset: pd.DataFrame,
         return pd.DataFrame(columns=["time", "order", "detector_id", "value"])
 
     for i, r in dets.iterrows():
-        df30 = fetch_timeseries(str(r.detector_id), date_str, start_hm, end_hm, sensor_type=sensor_key)
+        df30 = fetch_timeseries(str(r.detector_id), start_dt, end_dt, sensor_type=sensor_key)
         if df30.empty:
 
             percent = min(100, max(0, int(round((i + 1) * 100 / n))))
@@ -100,10 +100,24 @@ with st.sidebar:
     sensor_type = st.selectbox("Sensor Type", ["V30 (volume)","C30 (occupancy)","S30 (speed)"], index=0)
     sensor_key = {"V30 (volume)":"V30", "C30 (occupancy)":"C30", "S30 (speed)":"S30"}[sensor_type]
 
-    date = st.date_input("Date", pd.Timestamp.today().date())
-    c1, c2 = st.columns(2)
-    start_hm = c1.text_input("Start (HH:MM)", "07:00")
-    end_hm   = c2.text_input("End (HH:MM)", "09:00")
+    today_date = pd.Timestamp.today().date()
+    default_start_time = time(7, 0)
+    default_end_time = time(9, 0)
+
+    start_col, end_col = st.columns(2)
+    with start_col:
+        start_date = st.date_input("Start Date", today_date)
+        start_time = st.time_input("Start Time", default_start_time, step=60)
+    with end_col:
+        end_date = st.date_input("End Date", today_date)
+        end_time = st.time_input("End Time", default_end_time, step=60)
+
+    start_dt = datetime.combine(start_date, start_time)
+    end_dt = datetime.combine(end_date, end_time)
+
+    if end_dt <= start_dt:
+        st.warning("End time must be after the start time.")
+        st.stop()
 
 # —— Subset of sensors —— #
 df_show = df_meta.copy()
@@ -158,8 +172,12 @@ with tab_ts:
     if not target_id:
         st.info("Please click a sensor on the Map, or enter a detector_id above.")
     else:
-        st.write(f"**Detector:** `{target_id}`  | **Metric:** `{sensor_key}`  | **Corridor:** `{route or 'N/A'}-{direction or 'N/A'}`")
-        df_30s = fetch_timeseries(str(target_id), str(date), start_hm, end_hm, sensor_type=sensor_key)
+        st.write(
+            f"**Detector:** `{target_id}`  | **Metric:** `{sensor_key}`  | "
+            f"**Range:** `{start_dt:%Y-%m-%d %H:%M}` → `{end_dt:%Y-%m-%d %H:%M}`  | "
+            f"**Corridor:** `{route or 'N/A'}-{direction or 'N/A'}`"
+        )
+        df_30s = fetch_timeseries(str(target_id), start_dt, end_dt, sensor_type=sensor_key)
         if df_30s.empty:
             st.warning("No data returned: if upstream is not configured yet, mock data will be used; or adjust the time window.")
         else:
@@ -193,7 +211,7 @@ with tab_heat:
     if df_show.empty:
         st.info("No sensors under current filter; cannot render.")
     else:
-        dfh = build_heatmap_long(df_show, str(date), start_hm, end_hm, sensor_key, max_det=max_det)
+        dfh = build_heatmap_long(df_show, start_dt, end_dt, sensor_key, max_det=max_det)
         if dfh.empty:
             st.warning("Heatmap has no data. Try narrowing the time window or check upstream.")
         else:
@@ -237,7 +255,7 @@ with tab_kpi:
             prog.empty()
         else:
             for i, r in dets.iterrows():
-                df30 = fetch_timeseries(str(r.detector_id), str(date), start_hm, end_hm, sensor_type=sensor_key)
+                df30 = fetch_timeseries(str(r.detector_id), start_dt, end_dt, sensor_type=sensor_key)
                 if not df30.empty:
                     f = rule_flags(df30)
                     sev = int(bool(f.get("negative_any"))) + int(bool(f.get("flatline_any"))) + int(bool(f.get("zero_streak")))

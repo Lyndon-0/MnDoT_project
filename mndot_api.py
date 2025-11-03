@@ -1,5 +1,7 @@
 import os
 import time
+from datetime import datetime
+
 import requests
 import pandas as pd
 import numpy as np
@@ -47,7 +49,7 @@ def load_detector_list(csv_path="data/I-94_detectors_converted.csv"):
 
 
 @cache_ttl(ttl=30)
-def fetch_timeseries(detector_id: str, date_str: str, start_hm: str, end_hm: str, sensor_type: str = "V30") -> pd.DataFrame:
+def fetch_timeseries(detector_id: str, start_dt: datetime, end_dt: datetime, sensor_type: str = "V30") -> pd.DataFrame:
     """
     Fetch a 30-second time series for a given detector and time window.
 
@@ -55,12 +57,10 @@ def fetch_timeseries(detector_id: str, date_str: str, start_hm: str, end_hm: str
     ----------
     detector_id : str
         The detector identifier (as listed in your metadata).
-    date_str : str
-        Date string in YYYY-MM-DD format (local date).
-    start_hm : str
-        Start time "HH:MM" (local).
-    end_hm : str
-        End time "HH:MM" (local).
+    start_dt : datetime-like
+        Start timestamp (interpreted as local America/Chicago if timezone-aware).
+    end_dt : datetime-like
+        End timestamp (interpreted as local America/Chicago if timezone-aware).
     sensor_type : str
         One of ["V30", "C30", "S30"] for volume/occupancy/speed respectively.
 
@@ -72,11 +72,28 @@ def fetch_timeseries(detector_id: str, date_str: str, start_hm: str, end_hm: str
     """
     # If the upstream base URL is not configured, return a realistic mock series.
     # This keeps the app usable in local development or before the API is ready.
+    start_ts = pd.Timestamp(start_dt)
+    end_ts = pd.Timestamp(end_dt)
+
+    if pd.isna(start_ts) or pd.isna(end_ts) or end_ts <= start_ts:
+        return pd.DataFrame(columns=["ts", "value"])
+
+    # Normalize to naive local timestamps for downstream use.
+    if start_ts.tz is not None:
+        start_ts = start_ts.tz_convert("America/Chicago").tz_localize(None).to_pydatetime()
+    else:
+        start_ts = start_ts.to_pydatetime()
+
+    if end_ts.tz is not None:
+        end_ts = end_ts.tz_convert("America/Chicago").tz_localize(None).to_pydatetime()
+    else:
+        end_ts = end_ts.to_pydatetime()
+
     if not MN_API_BASE:
         # Build a 30-second index on [start, end) (lower-inclusive, upper-exclusive).
         idx = pd.date_range(
-            f"{date_str} {start_hm}",
-            f"{date_str} {end_hm}",
+            start_ts,
+            end_ts,
             freq="30s",                 # NOTE: lowercase 's' avoids the pandas deprecation warning
             inclusive="left"
         )
@@ -115,20 +132,17 @@ def fetch_timeseries(detector_id: str, date_str: str, start_hm: str, end_hm: str
         return pd.DataFrame({"ts": idx, "value": val})
 
     # ---- Real upstream path (replace with your actual endpoint contract) ----
-    # Example 1 (query style):
-    #   .../timeseries?date=YYYY-MM-DD&detector=5838&type=V30&start=07:00&end=09:00&step=30
-    url = (
-        f"{MN_API_BASE}/timeseries"
-        f"?date={date_str}&detector={detector_id}&type={sensor_type}"
-        f"&start={start_hm}&end={end_hm}&step=30"
-    )
+    params = {
+        "detector": detector_id,
+        "type": sensor_type,
+        "start": start_ts.strftime("%Y-%m-%dT%H:%M"),
+        "end": end_ts.strftime("%Y-%m-%dT%H:%M"),
+        "step": "30",
+    }
+    if start_ts.date() == end_ts.date():
+        params["date"] = start_ts.strftime("%Y-%m-%d")
 
-    # Example 2 (path style):
-    #   .../{date}/{area}/{detector_id}/{sensor_type}?start=...&end=...&step=30
-    # area = "I-94-EB"
-    # url = f"{MN_API_BASE}/{date_str}/{area}/{detector_id}/{sensor_type}?start={start_hm}&end={end_hm}&step=30"
-
-    r = requests.get(url, timeout=TIMEOUT)
+    r = requests.get(f"{MN_API_BASE}/timeseries", params=params, timeout=TIMEOUT)
     r.raise_for_status()
     js = r.json()
 
