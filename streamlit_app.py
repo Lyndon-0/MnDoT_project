@@ -127,7 +127,7 @@ if direction: df_show = df_show[df_show["direction"]==direction]
 # ======================
 # TABS
 # ======================
-tab_map, tab_ts, tab_heat, tab_kpi = st.tabs(["Map", "Time Series", "Heatmap", "KPI"])
+tab_map, tab_ts, tab_kpi = st.tabs(["Map", "Time Series", "KPI"])
 
 # ======================
 # Map Tab
@@ -202,45 +202,11 @@ with tab_ts:
             st.caption("Note: V30=30-sec volume; C30=30-sec occupancy; S30=30-sec speed. Current rules are demo-only; we will add the 14 health metrics and VBS next.")
 
 # ======================
-# Heatmap Tab
-# ======================
-with tab_heat:
-    st.subheader("③ Time–Space Heatmap (5-min)")
-    st.caption("For the current corridor/direction, fetch a subset of sensors, aggregate, and render. To avoid load, default max 40 sensors.")
-    max_det = st.slider("Max sensors to load (Heatmap)", min_value=10, max_value=120, value=40, step=10)
-    if df_show.empty:
-        st.info("No sensors under current filter; cannot render.")
-    else:
-        dfh = build_heatmap_long(df_show, start_dt, end_dt, sensor_key, max_det=max_det)
-        if dfh.empty:
-            st.warning("Heatmap has no data. Try narrowing the time window or check upstream.")
-        else:
-            # Optional normalization: z-score per detector for better visual contrast
-            norm = st.checkbox("Normalize per detector (z-score)", value=True)
-            plot_df = dfh.copy()
-            if norm:
-                plot_df["value"] = plot_df.groupby("detector_id")["value"].transform(
-                    lambda x: (x - x.mean()) / (x.std() + 1e-9)
-                )
-
-            heat = (
-                alt.Chart(plot_df)
-                .mark_rect()
-                .encode(
-                    x=alt.X("time:T", title="Time (5-min)"),
-                    y=alt.Y("order:O", title="Sensor order (along corridor)", sort="ascending"),
-                    color=alt.Color("value:Q", title=sensor_key),
-                    tooltip=["detector_id:N", "time:T", alt.Tooltip("value:Q", format=".2f")],
-                )
-                .properties(height=420)
-            )
-            st.altair_chart(heat, use_container_width=True)
-
 # ======================
 # KPI Tab
 # ======================
 with tab_kpi:
-    st.subheader("④ KPI / Health Summary (within window)")
+    st.subheader("③ KPI / Health Summary (within window)")
     if df_show.empty:
         st.info("No sensors under current filter.")
     else:
