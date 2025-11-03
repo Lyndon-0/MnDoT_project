@@ -10,6 +10,18 @@ st.set_page_config(page_title="MnDOT Detector Monitor — I-94", layout="wide")
 st.title("MnDOT Detector Monitor — I-94")
 st.caption("Click a sensor on the map → fetch 30-sec data → aggregate to 5-min + basic rule checks (ready for MnDOT real-time API).")
 
+# Maintain UI state across interactions
+if "clicked_id" not in st.session_state:
+    st.session_state.clicked_id = None
+if "show_ts_modal" not in st.session_state:
+    st.session_state.show_ts_modal = False
+if "last_click_signature" not in st.session_state:
+    st.session_state.last_click_signature = None
+if "dismissed_signature" not in st.session_state:
+    st.session_state.dismissed_signature = None
+if "dismissed_consumed" not in st.session_state:
+    st.session_state.dismissed_consumed = True
+
 # ======================
 # helpers
 # ======================
@@ -26,6 +38,14 @@ def agg_5min(df_30s: pd.DataFrame, value_col: str = "value") -> pd.DataFrame:
         .rename(columns={value_col: "val"})
     )
     return out
+
+
+def _close_ts_panel() -> None:
+    """Reset modal state when the time-series dialog is dismissed."""
+    st.session_state.show_ts_modal = False
+    st.session_state.dismissed_signature = st.session_state.last_click_signature
+    st.session_state.dismissed_consumed = False
+    st.session_state.last_click_signature = None
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_heatmap_long(df_meta_subset: pd.DataFrame,
@@ -127,13 +147,13 @@ if direction: df_show = df_show[df_show["direction"]==direction]
 # ======================
 # TABS
 # ======================
-tab_map, tab_ts, tab_kpi = st.tabs(["Map", "Time Series", "KPI"])
+tab_map, tab_kpi = st.tabs(["Map", "KPI"])
 
 # ======================
 # Map Tab
 # ======================
 with tab_map:
-    st.subheader("① Map / Click a sensor")
+    st.subheader("① Map / Click a sensor (time-series panel opens here)")
     if df_show.empty:
         st.warning("No sensors under current filters (use data/I-94_detectors_converted.csv first; replace with the official list later).")
         m = folium.Map(location=[44.97, -93.20], zoom_start=12)
@@ -144,69 +164,116 @@ with tab_map:
                 location=[r.lat, r.lon],
                 radius=6,
                 tooltip=f'{r.name} ({r.detector_id})',
-                popup=f'{r.name} ({r.detector_id})',
                 color="#2563EB",
                 fill=True
             ).add_to(m)
 
-    ret = st_folium(m, height=500)
+    # Stretch the Folium map to use the available viewport height inside the tab
+    full_height_css = """
+    <style>
+        .folium-map {
+            height: calc(100vh - 160px) !important;
+            width: 100% !important;
+        }
+    </style>
+    """
+    m.get_root().header.add_child(folium.Element(full_height_css))
+
+    ret = st_folium(
+        m,
+        height=700,
+        use_container_width=True,
+    )
+
     clicked_id = None
-    if ret and ret.get("last_object_clicked_popup"):
-        pop = ret["last_object_clicked_popup"]
-        if "(" in pop and ")" in pop:
-            clicked_id = pop.split("(")[-1].split(")")[0].strip()
-    # Save clicked result into session for other tabs
+    if ret:
+        label = ret.get("last_object_clicked_tooltip") or ret.get("last_object_clicked_popup")
+        latlng = ret.get("last_object_clicked") or ret.get("last_clicked")
+        if label and "(" in label and ")" in label:
+            if isinstance(latlng, dict):
+                lat = latlng.get("lat")
+                lng = latlng.get("lng")
+            elif isinstance(latlng, (list, tuple)) and len(latlng) >= 2:
+                lat, lng = latlng[0], latlng[1]
+            else:
+                lat = lng = None
+
+            if lat is not None and lng is not None:
+                signature = f"{label}|{float(lat):.6f},{float(lng):.6f}"
+            else:
+                signature = label
+
+            dismissed_sig = st.session_state.dismissed_signature
+
+            if signature == dismissed_sig:
+                st.session_state.dismissed_consumed = True
+            elif signature != st.session_state.last_click_signature:
+                clicked_id = label.split("(")[-1].split(")")[0].strip()
+                st.session_state.last_click_signature = signature
+                st.session_state.dismissed_signature = None
+                st.session_state.dismissed_consumed = True
+
     if clicked_id:
         st.session_state.clicked_id = clicked_id
+        st.session_state.show_ts_modal = True
 
-# ======================
-# Time Series Tab
-# ======================
-with tab_ts:
-    st.subheader("② Time Series (30s → 5-min) & Rule Checks")
-    # Read clicked id from Map tab; manual override is allowed
-    clicked_id = st.session_state.get("clicked_id")
-    manual_id = st.text_input("Enter detector_id manually (overrides map click)", value=clicked_id or "")
-    target_id = manual_id or clicked_id or (df_show["detector_id"].astype(str).iloc[0] if not df_show.empty else None)
+    default_target = st.session_state.get("clicked_id")
+    if not default_target and not df_show.empty:
+        default_target = str(df_show["detector_id"].astype(str).iloc[0])
 
-    if not target_id:
-        st.info("Please click a sensor on the Map, or enter a detector_id above.")
-    else:
-        st.write(
-            f"**Detector:** `{target_id}`  | **Metric:** `{sensor_key}`  | "
-            f"**Range:** `{start_dt:%Y-%m-%d %H:%M}` → `{end_dt:%Y-%m-%d %H:%M}`  | "
-            f"**Corridor:** `{route or 'N/A'}-{direction or 'N/A'}`"
+    button_col, _ = st.columns([0.3, 0.7])
+    with button_col:
+        st.button(
+            "Open time-series panel",
+            disabled=not default_target,
+            key="open_ts_panel",
+            on_click=lambda: st.session_state.update({
+                "show_ts_modal": True,
+            }),
         )
-        df_30s = fetch_timeseries(str(target_id), start_dt, end_dt, sensor_type=sensor_key)
-        if df_30s.empty:
-            st.warning("No data returned: if upstream is not configured yet, mock data will be used; or adjust the time window.")
-        else:
-            # 5-min aggregation (use helper for consistency across tabs)
-            df_5m = agg_5min(df_30s)
 
-            # Chart
-            line = alt.Chart(df_5m).mark_line().encode(
-                x=alt.X('ts:T', title='Time'),
-                y=alt.Y('val:Q', title=sensor_key),
-                tooltip=[alt.Tooltip('ts:T', title='Time'), alt.Tooltip('val:Q', title=sensor_key)]
-            ).properties(height=280)
-            st.altair_chart(line, use_container_width=True)
+    if st.session_state.get("show_ts_modal") and default_target:
+        @st.dialog("\u00A0", width="large", on_dismiss=_close_ts_panel)
+        def time_series_dialog():
+            target_id = str(default_target) if default_target else None
 
-            # Rules
-            flags = rule_flags(df_30s)
-            c1,c2,c3 = st.columns(3)
-            c1.metric("Negative values present", "Yes" if flags.get("negative_any") else "No")
-            c2.metric("Flatline present", "Yes" if flags.get("flatline_any") else "No")
-            c3.metric("Zero-value streak present", "Yes" if flags.get("zero_streak") else "No")
+            if not target_id:
+                st.info("Please click a sensor on the Map.")
+            else:
+                st.write(
+                    f"**Detector:** `{target_id}`  | **Metric:** `{sensor_key}`  | "
+                    f"**Range:** `{start_dt:%Y-%m-%d %H:%M}` → `{end_dt:%Y-%m-%d %H:%M}`  | "
+                    f"**Corridor:** `{route or 'N/A'}-{direction or 'N/A'}`"
+                )
+                df_30s = fetch_timeseries(str(target_id), start_dt, end_dt, sensor_type=sensor_key)
+                if df_30s.empty:
+                    st.warning("No data returned: if upstream is not configured yet, mock data will be used; or adjust the time window.")
+                else:
+                    df_5m = agg_5min(df_30s)
 
-            st.caption("Note: V30=30-sec volume; C30=30-sec occupancy; S30=30-sec speed. Current rules are demo-only; we will add the 14 health metrics and VBS next.")
+                    line = alt.Chart(df_5m).mark_line().encode(
+                        x=alt.X('ts:T', title='Time'),
+                        y=alt.Y('val:Q', title=sensor_key),
+                        tooltip=[alt.Tooltip('ts:T', title='Time'), alt.Tooltip('val:Q', title=sensor_key)]
+                    ).properties(height=280)
+                    st.altair_chart(line, use_container_width=True)
+
+                    flags = rule_flags(df_30s)
+                    c1,c2,c3 = st.columns(3)
+                    c1.metric("Negative values present", "Yes" if flags.get("negative_any") else "No")
+                    c2.metric("Flatline present", "Yes" if flags.get("flatline_any") else "No")
+                    c3.metric("Zero-value streak present", "Yes" if flags.get("zero_streak") else "No")
+
+                    st.caption("Note: V30=30-sec volume; C30=30-sec occupancy; S30=30-sec speed. Current rules are demo-only; we will add the 14 health metrics and VBS next.")
+
+        time_series_dialog()
 
 # ======================
 # ======================
 # KPI Tab
 # ======================
 with tab_kpi:
-    st.subheader("③ KPI / Health Summary (within window)")
+    st.subheader("② KPI / Health Summary (within window)")
     if df_show.empty:
         st.info("No sensors under current filter.")
     else:
