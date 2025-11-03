@@ -36,7 +36,7 @@ def cache_ttl(ttl=30):
 
 
 @cache_ttl(ttl=300)
-def load_detector_list(csv_path="data/detectors_sample.csv"):
+def load_detector_list(csv_path="data/I-94_detectors_converted.csv"):
     """
     Load the detector metadata list (route, direction, detector_id, lat/lon, etc.).
     You can replace the CSV with an official list later without touching the UI code.
