@@ -121,7 +121,7 @@ tab_map, tab_ts, tab_heat, tab_kpi = st.tabs(["Map", "Time Series", "Heatmap", "
 with tab_map:
     st.subheader("① Map / Click a sensor")
     if df_show.empty:
-        st.warning("No sensors under current filters (use data/detectors_sample.csv first; replace with the official list later).")
+        st.warning("No sensors under current filters (use data/I-94_detectors_converted.csv first; replace with the official list later).")
         m = folium.Map(location=[44.97, -93.20], zoom_start=12)
     else:
         m = folium.Map(location=[df_show["lat"].mean(), df_show["lon"].mean()], zoom_start=12)
