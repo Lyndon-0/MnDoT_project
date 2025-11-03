@@ -19,8 +19,6 @@ if "last_click_signature" not in st.session_state:
     st.session_state.last_click_signature = None
 if "dismissed_signature" not in st.session_state:
     st.session_state.dismissed_signature = None
-if "dismissed_consumed" not in st.session_state:
-    st.session_state.dismissed_consumed = True
 
 # ======================
 # helpers
@@ -44,7 +42,6 @@ def _close_ts_panel() -> None:
     """Reset modal state when the time-series dialog is dismissed."""
     st.session_state.show_ts_modal = False
     st.session_state.dismissed_signature = st.session_state.last_click_signature
-    st.session_state.dismissed_consumed = False
     st.session_state.last_click_signature = None
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -206,12 +203,11 @@ with tab_map:
             dismissed_sig = st.session_state.dismissed_signature
 
             if signature == dismissed_sig:
-                st.session_state.dismissed_consumed = True
+                pass
             elif signature != st.session_state.last_click_signature:
                 clicked_id = label.split("(")[-1].split(")")[0].strip()
                 st.session_state.last_click_signature = signature
                 st.session_state.dismissed_signature = None
-                st.session_state.dismissed_consumed = True
 
     if clicked_id:
         st.session_state.clicked_id = clicked_id
