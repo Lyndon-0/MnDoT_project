@@ -1,6 +1,8 @@
 import os
+import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, date
+from pathlib import Path
 
 import requests
 import pandas as pd
@@ -9,6 +11,7 @@ import numpy as np
 # Base URL for the real upstream service (configure via environment when deployed).
 # If empty, the module will generate mock data so the UI can run end-to-end.
 MN_API_BASE = os.getenv("MNDOT_API_BASE", "").rstrip("/")
+LOCAL_DATA_ROOT = Path(os.getenv("MNDOT_LOCAL_DATA", "data/mndot_raw")).expanduser()
 TIMEOUT = 15  # seconds
 
 
@@ -89,47 +92,12 @@ def fetch_timeseries(detector_id: str, start_dt: datetime, end_dt: datetime, sen
     else:
         end_ts = end_ts.to_pydatetime()
 
+    local_df = _load_local_timeseries(detector_id, sensor_type, start_ts, end_ts)
+    if local_df is not None:
+        mask = (local_df["ts"] >= start_ts) & (local_df["ts"] < end_ts)
+        return local_df.loc[mask].sort_values("ts").reset_index(drop=True)
     if not MN_API_BASE:
-        # Build a 30-second index on [start, end) (lower-inclusive, upper-exclusive).
-        idx = pd.date_range(
-            start_ts,
-            end_ts,
-            freq="30s",                 # NOTE: lowercase 's' avoids the pandas deprecation warning
-            inclusive="left"
-        )
-        if len(idx) == 0:
-            return pd.DataFrame(columns=["ts", "value"])
-
-        # Create a simple diurnal shape for different metrics using numpy,
-        # so later slice-assignments are safe (numpy arrays are mutable).
-        t = idx.hour.to_numpy() + idx.minute.to_numpy() / 60.0 + idx.second.to_numpy() / 3600.0
-
-        if sensor_type == "V30":           # per-30s volume
-            peak, amp, noise = 8.0, 900.0, 18.0
-            base = amp * np.exp(-((t - peak) ** 2) / 4.0)
-            val = base + np.random.normal(0, noise, size=len(idx))
-            val = np.maximum(val, 0.0)
-        elif sensor_type == "C30":         # occupancy in %
-            peak, amp, noise = 8.5, 22.0, 2.0
-            base = amp * np.exp(-((t - peak) ** 2) / 4.5) + 4.0
-            val = base + np.random.normal(0, noise, size=len(idx))
-            val = np.clip(val, 0.0, 100.0)
-        elif sensor_type == "S30":         # speed mph
-            base = 60.0 - 15.0 * np.exp(-((t - 8.0) ** 2) / 2.0)
-            val = base + np.random.normal(0, 1.8, size=len(idx))
-            val = np.clip(val, 0.0, 85.0)
-        else:
-            # Unknown metric: return zeros but keep the time axis.
-            val = np.zeros(len(idx), dtype=float)
-
-        # Ensure 'val' is a mutable numpy array before injecting a zero streak.
-        val = np.asarray(val, dtype=float).copy()
-
-        # Inject a small zero streak (e.g., 5 minutes = 10 points) to demo rule checks.
-        if len(val) >= 30:
-            val[20:30] = 0.0
-
-        return pd.DataFrame({"ts": idx, "value": val})
+        return pd.DataFrame(columns=["ts", "value"])
 
     # ---- Real upstream path (replace with your actual endpoint contract) ----
     params = {
@@ -185,6 +153,71 @@ def normalize_timeseries_json(js):
         )
 
     return df[["timestamp", "value"]]
+
+
+def _load_local_timeseries(detector_id: str, sensor_type: str, start_ts: datetime, end_ts: datetime) -> pd.DataFrame | None:
+    sensor_type_slug = sensor_type.lower()
+    if LOCAL_DATA_ROOT is None:
+        return None
+
+    frames: list[pd.DataFrame] = []
+
+    day = start_ts.date()
+    end_day = end_ts.date()
+
+    while day <= end_day:
+        year_dir = LOCAL_DATA_ROOT / f"{day:%Y}"
+        file_path = year_dir / f"{day:%Y%m%d}" / f"{detector_id}.{sensor_type_slug}.json"
+        print("file_path:", file_path)
+        if not file_path.exists():
+            return None
+        try:
+            with file_path.open("r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return None
+
+        df_day = _payload_to_dataframe(payload, day)
+        if df_day is None:
+            return None
+
+        frames.append(df_day)
+        day += timedelta(days=1)
+
+    if not frames:
+        return None
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def _payload_to_dataframe(payload, day: date) -> pd.DataFrame | None:
+    if isinstance(payload, list):
+        if not payload:
+            return pd.DataFrame(columns=["ts", "value"])
+        start = pd.Timestamp(day, tz="America/Chicago")
+        idx = pd.date_range(start=start, periods=len(payload), freq="30S")
+        values = pd.to_numeric(pd.Series(payload, dtype="float"), errors="coerce")
+        df = pd.DataFrame(
+            {
+                "ts": idx.tz_convert("America/Chicago").tz_localize(None),
+                "value": values,
+            }
+        )
+        return df.dropna(subset=["ts", "value"])
+
+    try:
+        df_raw = normalize_timeseries_json(payload)
+    except Exception:
+        return None
+
+    ts = pd.to_datetime(df_raw["timestamp"], errors="coerce", utc=True)
+    df = pd.DataFrame(
+        {
+            "ts": ts.dt.tz_convert("America/Chicago").dt.tz_localize(None),
+            "value": pd.to_numeric(df_raw["value"], errors="coerce"),
+        }
+    )
+    return df.dropna()
 
 
 def rule_flags(df: pd.DataFrame, flat_k: int = 10):
