@@ -1,8 +1,8 @@
 import streamlit as st, pandas as pd, altair as alt
 from streamlit_folium import st_folium
 import folium
-import numpy as np  
-from datetime import datetime, time  
+import numpy as np
+from datetime import datetime, time
 
 from mndot_api import load_detector_list, fetch_timeseries, rule_flags
 
@@ -19,6 +19,9 @@ if "last_click_signature" not in st.session_state:
     st.session_state.last_click_signature = None
 if "dismissed_signature" not in st.session_state:
     st.session_state.dismissed_signature = None
+
+MINNEAPOLIS_CENTER = (44.9778, -93.2650)
+MINNEAPOLIS_RADIUS_KM = 12.0
 
 # ======================
 # helpers
@@ -50,6 +53,20 @@ def sensor_has_records(detector_id: str, start_dt: datetime, end_dt: datetime, s
     """Return True if MnDOT API yields any rows for the detector/time window."""
     df = fetch_timeseries(str(detector_id), start_dt, end_dt, sensor_type=sensor_key)
     return not df.empty
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two points (km). Accepts scalars or numpy arrays."""
+    R = 6371.0
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2.0) ** 2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    return R * c
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -155,10 +172,24 @@ with st.sidebar:
         st.warning("End time must be after the start time.")
         st.stop()
 
+    minneapolis_only = st.checkbox(
+        "Only show Minneapolis sensors",
+        value=True,
+        help="Keeps markers within ~12 km of downtown Minneapolis.",
+    )
+
 # —— Subset of sensors —— #
 df_show = df_meta.copy()
 if route: df_show = df_show[df_show["route"]==route]
 if direction: df_show = df_show[df_show["direction"]==direction]
+if minneapolis_only and not df_show.empty:
+    d_km = haversine_km(
+        df_show["lat"].astype(float).to_numpy(),
+        df_show["lon"].astype(float).to_numpy(),
+        MINNEAPOLIS_CENTER[0],
+        MINNEAPOLIS_CENTER[1],
+    )
+    df_show = df_show.loc[d_km <= MINNEAPOLIS_RADIUS_KM]
 
 # ======================
 # TABS
