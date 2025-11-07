@@ -220,12 +220,40 @@ def _payload_to_dataframe(payload, day: date) -> pd.DataFrame | None:
     return df.dropna()
 
 
-def rule_flags(df: pd.DataFrame, flat_k: int = 10):
+def _has_constant_run(values: np.ndarray, min_len: int, tol: float = 1e-6) -> bool:
+    """
+    Return True if any run of identical values (within tolerance) meets or exceeds min_len.
+    """
+    if len(values) < min_len:
+        return False
+
+    prev = None
+    run_length = 0
+    for x in values:
+        if not np.isfinite(x):
+            prev = None
+            run_length = 0
+            continue
+        if prev is None:
+            prev = x
+            run_length = 1
+            continue
+        if abs(x - prev) <= tol:
+            run_length += 1
+            if run_length >= min_len:
+                return True
+        else:
+            run_length = 1
+            prev = x
+    return False
+
+
+def rule_flags(df: pd.DataFrame, flat_k: int = 40, zero_k: int | None = 10):
     """
     Basic rule checks on a 30-second series:
       1) Any negative values.
-      2) Any flatline of length >= flat_k (std very close to zero).
-      3) Any streak of zeros of length >= flat_k.
+      2) Any flatline of identical values lasting >= flat_k samples.
+      3) Any streak of zeros lasting >= zero_k samples (defaults to flat_k if None).
 
     Parameters
     ----------
@@ -247,20 +275,17 @@ def rule_flags(df: pd.DataFrame, flat_k: int = 10):
     # 1) Negative values
     out["negative_any"] = bool((v < 0).any())
 
-    # 2) Flatline: rolling std within a window nearly zero
-    if len(v) >= flat_k:
-        rolling_std = pd.Series(v).rolling(flat_k).std().to_numpy()
-        out["flatline_any"] = bool((np.nan_to_num(rolling_std, nan=0.0) < 1e-3).any())
-    else:
-        out["flatline_any"] = False
+    # 2) Flatline: repeated identical values over the requested window
+    out["flatline_any"] = _has_constant_run(v, min_len=flat_k) if flat_k else False
 
     # 3) Zero-value streak
+    zero_len = zero_k if zero_k is not None else flat_k
     run_zero = 0
     zero_flag = False
     for x in v:
         if abs(x) < 1e-9:
             run_zero += 1
-            if run_zero >= flat_k:
+            if zero_len and run_zero >= zero_len:
                 zero_flag = True
                 break
         else:

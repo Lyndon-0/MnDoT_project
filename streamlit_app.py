@@ -48,13 +48,6 @@ def _close_ts_panel() -> None:
     st.session_state.last_click_signature = None
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def sensor_has_records(detector_id: str, start_dt: datetime, end_dt: datetime, sensor_key: str) -> bool:
-    """Return True if MnDOT API yields any rows for the detector/time window."""
-    df = fetch_timeseries(str(detector_id), start_dt, end_dt, sensor_type=sensor_key)
-    return not df.empty
-
-
 def haversine_km(lat1, lon1, lat2, lon2):
     """Great-circle distance between two points (km). Accepts scalars or numpy arrays."""
     R = 6371.0
@@ -70,15 +63,29 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_anomaly_flags(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int]:
+def detect_negative_anomalies(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int | None]:
+    """
+    Simulate backend anomaly detection: mark sensors with any negative values or flatlines (>5 samples) as anomalous (1).
+    Returns None for sensors with no data so the map can keep them gray.
+    """
+    flags: dict[str, int | None] = {}
+    for det_id in sensor_ids:
+        df = fetch_timeseries(str(det_id), start_dt, end_dt, sensor_type=sensor_key)
+        if df.empty:
+            flags[det_id] = None
+            continue
+        checks = rule_flags(df)
+        flags[det_id] = 1 if (checks.get("negative_any") or checks.get("flatline_any")) else 0
+    return flags
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_anomaly_flags(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int | None]:
     """
     Placeholder for backend anomaly API.
-    Replace the body with a real request that returns 0/1 flags per sensor.
+    Currently proxies to detect_negative_anomalies(); replace with a real network call later.
     """
-    if not sensor_ids:
-        return {}
-    flags = np.random.randint(0, 2, size=len(sensor_ids))
-    return {sid: int(flag) for sid, flag in zip(sensor_ids, flags)}
+    return detect_negative_anomalies(sensor_ids, start_dt, end_dt, sensor_key)
 
 @st.cache_data(ttl=60, show_spinner=False)
 def build_heatmap_long(df_meta_subset: pd.DataFrame,
@@ -209,29 +216,23 @@ with tab_map:
         COLOR_ANOMALOUS = "#DC2626"
         COLOR_HEALTHY = "#16A34A"
         COLOR_NODATA = "#9CA3AF"
-        COLOR_UNKNOWN = "#FCD34D"
 
         sensor_ids = df_show["detector_id"].astype(str).tolist()
         anomaly_flags = fetch_anomaly_flags(sensor_ids, start_dt, end_dt, sensor_key)
 
         for _, r in df_show.iterrows():
             det_id = str(r.detector_id)
-            has_data = sensor_has_records(det_id, start_dt, end_dt, sensor_key)
             flag = anomaly_flags.get(det_id)
 
-            if not has_data:
+            if flag is None:
                 marker_color = COLOR_NODATA
                 status_text = "no recent data"
+            elif flag == 1:
+                marker_color = COLOR_ANOMALOUS
+                status_text = "anomalous (negative or flatline)"
             else:
-                if flag == 1:
-                    marker_color = COLOR_ANOMALOUS
-                    status_text = "anomalous"
-                elif flag == 0:
-                    marker_color = COLOR_HEALTHY
-                    status_text = "normal"
-                else:
-                    marker_color = COLOR_UNKNOWN
-                    status_text = "anomaly unknown"
+                marker_color = COLOR_HEALTHY
+                status_text = "normal"
 
             folium.CircleMarker(
                 location=[r.lat, r.lon],
@@ -240,7 +241,7 @@ with tab_map:
                 color=marker_color,
                 fill=True,
                 fill_color=marker_color,
-                fill_opacity=0.9 if has_data else 0.5,
+                fill_opacity=0.9 if flag is not None else 0.5,
             ).add_to(m)
 
     # Stretch the Folium map to use the available viewport height inside the tab
@@ -283,9 +284,12 @@ with tab_map:
             if signature == dismissed_sig:
                 pass
             elif signature != st.session_state.last_click_signature:
-                clicked_id = label.split("(")[-1].split(")")[0].strip()
-                st.session_state.last_click_signature = signature
-                st.session_state.dismissed_signature = None
+                paren_open = label.find("(")
+                paren_close = label.find(")", paren_open + 1)
+                if paren_open != -1 and paren_close != -1 and paren_close > paren_open:
+                    clicked_id = label[paren_open + 1:paren_close].strip()
+                    st.session_state.last_click_signature = signature
+                    st.session_state.dismissed_signature = None
 
     if clicked_id:
         st.session_state.clicked_id = clicked_id
