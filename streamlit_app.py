@@ -44,6 +44,13 @@ def _close_ts_panel() -> None:
     st.session_state.dismissed_signature = st.session_state.last_click_signature
     st.session_state.last_click_signature = None
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def sensor_has_records(detector_id: str, start_dt: datetime, end_dt: datetime, sensor_key: str) -> bool:
+    """Return True if MnDOT API yields any rows for the detector/time window."""
+    df = fetch_timeseries(str(detector_id), start_dt, end_dt, sensor_type=sensor_key)
+    return not df.empty
+
 @st.cache_data(ttl=60, show_spinner=False)
 def build_heatmap_long(df_meta_subset: pd.DataFrame,
                        start_dt: datetime, end_dt: datetime,
@@ -156,13 +163,20 @@ with tab_map:
         m = folium.Map(location=[44.97, -93.20], zoom_start=12)
     else:
         m = folium.Map(location=[df_show["lat"].mean(), df_show["lon"].mean()], zoom_start=12)
+        HAS_DATA_COLOR = "#2563EB"
+        NO_DATA_COLOR = "#9CA3AF"
         for _, r in df_show.iterrows():
+            has_data = sensor_has_records(str(r.detector_id), start_dt, end_dt, sensor_key)
+            marker_color = HAS_DATA_COLOR if has_data else NO_DATA_COLOR
+            status_text = "has data" if has_data else "no data"
             folium.CircleMarker(
                 location=[r.lat, r.lon],
                 radius=6,
-                tooltip=f'{r.name} ({r.detector_id})',
-                color="#2563EB",
-                fill=True
+                tooltip=f'{r.name} ({r.detector_id}) — {status_text}',
+                color=marker_color,
+                fill=True,
+                fill_color=marker_color,
+                fill_opacity=0.9 if has_data else 0.5,
             ).add_to(m)
 
     # Stretch the Folium map to use the available viewport height inside the tab
