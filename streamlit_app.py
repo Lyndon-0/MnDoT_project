@@ -51,6 +51,18 @@ def sensor_has_records(detector_id: str, start_dt: datetime, end_dt: datetime, s
     df = fetch_timeseries(str(detector_id), start_dt, end_dt, sensor_type=sensor_key)
     return not df.empty
 
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_anomaly_flags(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int]:
+    """
+    Placeholder for backend anomaly API.
+    Replace the body with a real request that returns 0/1 flags per sensor.
+    """
+    if not sensor_ids:
+        return {}
+    flags = np.random.randint(0, 2, size=len(sensor_ids))
+    return {sid: int(flag) for sid, flag in zip(sensor_ids, flags)}
+
 @st.cache_data(ttl=60, show_spinner=False)
 def build_heatmap_long(df_meta_subset: pd.DataFrame,
                        start_dt: datetime, end_dt: datetime,
@@ -163,12 +175,33 @@ with tab_map:
         m = folium.Map(location=[44.97, -93.20], zoom_start=12)
     else:
         m = folium.Map(location=[df_show["lat"].mean(), df_show["lon"].mean()], zoom_start=12)
-        HAS_DATA_COLOR = "#2563EB"
-        NO_DATA_COLOR = "#9CA3AF"
+        COLOR_ANOMALOUS = "#DC2626"
+        COLOR_HEALTHY = "#16A34A"
+        COLOR_NODATA = "#9CA3AF"
+        COLOR_UNKNOWN = "#FCD34D"
+
+        sensor_ids = df_show["detector_id"].astype(str).tolist()
+        anomaly_flags = fetch_anomaly_flags(sensor_ids, start_dt, end_dt, sensor_key)
+
         for _, r in df_show.iterrows():
-            has_data = sensor_has_records(str(r.detector_id), start_dt, end_dt, sensor_key)
-            marker_color = HAS_DATA_COLOR if has_data else NO_DATA_COLOR
-            status_text = "has data" if has_data else "no data"
+            det_id = str(r.detector_id)
+            has_data = sensor_has_records(det_id, start_dt, end_dt, sensor_key)
+            flag = anomaly_flags.get(det_id)
+
+            if not has_data:
+                marker_color = COLOR_NODATA
+                status_text = "no recent data"
+            else:
+                if flag == 1:
+                    marker_color = COLOR_ANOMALOUS
+                    status_text = "anomalous"
+                elif flag == 0:
+                    marker_color = COLOR_HEALTHY
+                    status_text = "normal"
+                else:
+                    marker_color = COLOR_UNKNOWN
+                    status_text = "anomaly unknown"
+
             folium.CircleMarker(
                 location=[r.lat, r.lon],
                 radius=6,
