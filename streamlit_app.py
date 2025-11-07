@@ -4,7 +4,7 @@ import folium
 import numpy as np
 from datetime import datetime, time
 
-from mndot_api import load_detector_list, fetch_timeseries, rule_flags
+from mndot_api import load_detector_list, fetch_timeseries, rule_flags, constant_run_mask
 
 st.set_page_config(page_title="MnDOT Detector Monitor — I-94", layout="wide")
 st.title("MnDOT Detector Monitor — I-94")
@@ -22,6 +22,7 @@ if "dismissed_signature" not in st.session_state:
 
 MINNEAPOLIS_CENTER = (44.9778, -93.2650)
 MINNEAPOLIS_RADIUS_KM = 12.0
+FLATLINE_SAMPLES = 120  # 40 × 30s steps = 20 minutes
 
 # ======================
 # helpers
@@ -65,7 +66,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 @st.cache_data(ttl=30, show_spinner=False)
 def detect_negative_anomalies(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int | None]:
     """
-    Simulate backend anomaly detection: mark sensors with any negative values or flatlines (>5 samples) as anomalous (1).
+    Simulate backend anomaly detection: mark sensors with any negative values or flatlines (>=40 samples) as anomalous (1).
     Returns None for sensors with no data so the map can keep them gray.
     """
     flags: dict[str, int | None] = {}
@@ -74,7 +75,7 @@ def detect_negative_anomalies(sensor_ids: list[str], start_dt: datetime, end_dt:
         if df.empty:
             flags[det_id] = None
             continue
-        checks = rule_flags(df)
+        checks = rule_flags(df, flat_k=FLATLINE_SAMPLES)
         flags[det_id] = 1 if (checks.get("negative_any") or checks.get("flatline_any")) else 0
     return flags
 
@@ -329,14 +330,71 @@ with tab_map:
                 else:
                     df_5m = agg_5min(df_30s)
 
-                    line = alt.Chart(df_5m).mark_line().encode(
-                        x=alt.X('ts:T', title='Time'),
-                        y=alt.Y('val:Q', title=sensor_key),
-                        tooltip=[alt.Tooltip('ts:T', title='Time'), alt.Tooltip('val:Q', title=sensor_key)]
-                    ).properties(height=280)
-                    st.altair_chart(line, use_container_width=True)
+                    df_30s = df_30s.copy()
+                    df_30s["ts"] = pd.to_datetime(df_30s["ts"], errors="coerce")
+                    df_30s["value_num"] = pd.to_numeric(df_30s["value"], errors="coerce")
+                    df_30s = df_30s.dropna(subset=["ts"]).sort_values("ts")
 
-                    flags = rule_flags(df_30s)
+                    values = df_30s["value_num"].to_numpy()
+                    neg_mask = np.isfinite(values) & (values < 0)
+                    flat_mask = constant_run_mask(values, min_len=FLATLINE_SAMPLES)
+                    anomaly_mask = neg_mask | flat_mask
+
+                    df_30s["anomaly"] = anomaly_mask
+
+                    if not df_30s.empty:
+                        highlight = (
+                            df_30s.set_index("ts")["anomaly"]
+                            .resample("5min")
+                            .max()
+                            .reset_index()
+                            .rename(columns={"anomaly": "is_anomaly"})
+                        )
+                        df_plot = df_5m.merge(highlight, on="ts", how="left")
+                    else:
+                        df_plot = df_5m.copy()
+
+                    if df_plot.empty:
+                        st.warning("Aggregated data is empty; try broadening the time window.")
+                    else:
+                        df_plot["is_anomaly"] = df_plot["is_anomaly"].fillna(False).astype(bool)
+                        prev_flags = df_plot["is_anomaly"].shift(fill_value=False).fillna(False).astype(bool)
+                        start_flags = df_plot["is_anomaly"] & (~prev_flags)
+                        df_plot["anomaly_segment"] = np.where(
+                            df_plot["is_anomaly"],
+                            start_flags.cumsum(),
+                            np.nan,
+                        )
+
+                        base_line = alt.Chart(df_plot).mark_line(color="#2563EB", strokeWidth=2).encode(
+                            x=alt.X('ts:T', title='Time'),
+                            y=alt.Y('val:Q', title=sensor_key),
+                            tooltip=[
+                                alt.Tooltip('ts:T', title='Time'),
+                                alt.Tooltip('val:Q', title=sensor_key),
+                                alt.Tooltip('is_anomaly:N', title='Negative/Flatline'),
+                            ],
+                        )
+
+                        df_plot_anom = df_plot[df_plot["is_anomaly"]].copy()
+                        if not df_plot_anom.empty:
+                            highlight_line = alt.Chart(df_plot_anom).mark_line(color="#DC2626", strokeWidth=3).encode(
+                                x=alt.X('ts:T', title='Time'),
+                                y=alt.Y('val:Q', title=sensor_key),
+                                detail=alt.Detail('anomaly_segment:N'),
+                                tooltip=[
+                                    alt.Tooltip('ts:T', title='Time'),
+                                    alt.Tooltip('val:Q', title=sensor_key),
+                                    alt.Tooltip('is_anomaly:N', title='Negative/Flatline'),
+                                ],
+                            )
+                            chart = alt.layer(base_line, highlight_line).properties(height=280)
+                        else:
+                            chart = base_line.properties(height=280)
+
+                        st.altair_chart(chart, use_container_width=True)
+
+                    flags = rule_flags(df_30s, flat_k=FLATLINE_SAMPLES)
                     c1,c2,c3 = st.columns(3)
                     c1.metric("Negative values present", "Yes" if flags.get("negative_any") else "No")
                     c2.metric("Flatline present", "Yes" if flags.get("flatline_any") else "No")
@@ -368,7 +426,7 @@ with tab_kpi:
             for i, r in dets.iterrows():
                 df30 = fetch_timeseries(str(r.detector_id), start_dt, end_dt, sensor_type=sensor_key)
                 if not df30.empty:
-                    f = rule_flags(df30)
+                    f = rule_flags(df30, flat_k=FLATLINE_SAMPLES)
                     sev = int(bool(f.get("negative_any"))) + int(bool(f.get("flatline_any"))) + int(bool(f.get("zero_streak")))
                     rows.append({
                         "detector_id": r.detector_id,

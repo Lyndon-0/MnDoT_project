@@ -220,32 +220,46 @@ def _payload_to_dataframe(payload, day: date) -> pd.DataFrame | None:
     return df.dropna()
 
 
-def _has_constant_run(values: np.ndarray, min_len: int, tol: float = 1e-6) -> bool:
+def constant_run_mask(values: np.ndarray, min_len: int, tol: float = 1e-6) -> np.ndarray:
     """
-    Return True if any run of identical values (within tolerance) meets or exceeds min_len.
+    Flag samples that belong to any run of identical values (within tol) lasting >= min_len.
     """
-    if len(values) < min_len:
-        return False
+    arr = np.asarray(values, dtype="float64")
+    n = len(arr)
+    mask = np.zeros(n, dtype=bool)
+    if n == 0:
+        return mask
+    if min_len <= 1:
+        mask[:] = np.isfinite(arr)
+        return mask
 
     prev = None
+    run_start = None
     run_length = 0
-    for x in values:
-        if not np.isfinite(x):
+
+    for idx, val in enumerate(arr):
+        if not np.isfinite(val):
             prev = None
+            run_start = None
             run_length = 0
             continue
-        if prev is None:
-            prev = x
+
+        if prev is None or abs(val - prev) > tol:
+            prev = val
+            run_start = idx
             run_length = 1
-            continue
-        if abs(x - prev) <= tol:
-            run_length += 1
-            if run_length >= min_len:
-                return True
         else:
-            run_length = 1
-            prev = x
-    return False
+            prev = val
+            run_length += 1
+
+        if run_length >= min_len and run_start is not None:
+            mask[run_start : idx + 1] = True
+
+    return mask
+
+
+def _has_constant_run(values: np.ndarray, min_len: int, tol: float = 1e-8) -> bool:
+    return bool(constant_run_mask(values, min_len=min_len, tol=tol).any())
 
 
 def rule_flags(df: pd.DataFrame, flat_k: int = 40, zero_k: int | None = 10):
