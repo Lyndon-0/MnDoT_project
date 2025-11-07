@@ -262,7 +262,7 @@ def _has_constant_run(values: np.ndarray, min_len: int, tol: float = 1e-8) -> bo
     return bool(constant_run_mask(values, min_len=min_len, tol=tol).any())
 
 
-def rule_flags(df: pd.DataFrame, flat_k: int = 40, zero_k: int | None = 10):
+def rule_flags(df: pd.DataFrame, flat_k: int = 120, zero_k: int | None = 10):
     """
     Basic rule checks on a 30-second series:
       1) Any negative values.

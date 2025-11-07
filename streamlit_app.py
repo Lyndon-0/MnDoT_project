@@ -22,7 +22,8 @@ if "dismissed_signature" not in st.session_state:
 
 MINNEAPOLIS_CENTER = (44.9778, -93.2650)
 MINNEAPOLIS_RADIUS_KM = 12.0
-FLATLINE_SAMPLES = 120  # 40 × 30s steps = 20 minutes
+CORRIDOR_CHOICES = ["I-94", "I-35"]
+FLATLINE_SAMPLES = 120  # 120 × 30s steps = 60 minutes
 
 # ======================
 # helpers
@@ -66,7 +67,7 @@ def haversine_km(lat1, lon1, lat2, lon2):
 @st.cache_data(ttl=30, show_spinner=False)
 def detect_negative_anomalies(sensor_ids: list[str], start_dt: datetime, end_dt: datetime, sensor_key: str) -> dict[str, int | None]:
     """
-    Simulate backend anomaly detection: mark sensors with any negative values or flatlines (>=40 samples) as anomalous (1).
+    Simulate backend anomaly detection: mark sensors with any negative values or flatlines (>=120 samples) as anomalous (1).
     Returns None for sensors with no data so the map can keep them gray.
     """
     flags: dict[str, int | None] = {}
@@ -154,9 +155,14 @@ def build_heatmap_long(df_meta_subset: pd.DataFrame,
 with st.sidebar:
     st.header("Filters")
     df_meta = load_detector_list()
-    corridors = sorted(df_meta["route"].dropna().unique().tolist())
-    route = st.selectbox("Corridor", corridors, index=0 if corridors else None)
-    directions = sorted(df_meta[df_meta["route"]==route]["direction"].dropna().unique().tolist()) if route else []
+    selected_routes = st.multiselect(
+        "Corridor(s)",
+        options=CORRIDOR_CHOICES,
+        default=CORRIDOR_CHOICES,
+        help="Pick one or both corridors to include on the map.",
+    )
+    df_corridor_subset = df_meta if not selected_routes else df_meta[df_meta["route"].isin(selected_routes)]
+    directions = sorted(df_corridor_subset["direction"].dropna().astype(str).unique().tolist())
     direction = st.selectbox("Direction", directions, index=0 if directions else None)
     sensor_type = st.selectbox("Sensor Type", ["V30 (volume)","C30 (occupancy)","S30 (speed)"], index=0)
     sensor_key = {"V30 (volume)":"V30", "C30 (occupancy)":"C30", "S30 (speed)":"S30"}[sensor_type]
@@ -188,8 +194,10 @@ with st.sidebar:
 
 # —— Subset of sensors —— #
 df_show = df_meta.copy()
-if route: df_show = df_show[df_show["route"]==route]
-if direction: df_show = df_show[df_show["direction"]==direction]
+if selected_routes:
+    df_show = df_show[df_show["route"].isin(selected_routes)]
+if direction:
+    df_show = df_show[df_show["direction"]==direction]
 if minneapolis_only and not df_show.empty:
     d_km = haversine_km(
         df_show["lat"].astype(float).to_numpy(),
@@ -322,7 +330,8 @@ with tab_map:
                 st.write(
                     f"**Detector:** `{target_id}`  | **Metric:** `{sensor_key}`  | "
                     f"**Range:** `{start_dt:%Y-%m-%d %H:%M}` → `{end_dt:%Y-%m-%d %H:%M}`  | "
-                    f"**Corridor:** `{route or 'N/A'}-{direction or 'N/A'}`"
+                    f"**Corridor(s):** `{', '.join(selected_routes) if selected_routes else 'All'}` "
+                    f"/ **Direction:** `{direction or 'All'}`"
                 )
                 df_30s = fetch_timeseries(str(target_id), start_dt, end_dt, sensor_type=sensor_key)
                 if df_30s.empty:
