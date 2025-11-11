@@ -14,7 +14,7 @@ from mndot_fetcher import BulkDownloadSummary, fetch_date_range
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _detector_ids() -> List[str]:
-    df = load_detector_list()
+    df = load_detector_list("/home/MnDoT_project/data/all_detectors_converted.csv")
     if "detector_id" not in df.columns:
         raise ValueError("detector_id column missing from detector list")
     ids = df["detector_id"]
@@ -32,8 +32,10 @@ st.caption(
 with st.sidebar:
     st.header("Configuration")
     storage_dir_input = st.text_input("Storage directory", value="data/mndot_raw")
-    start_date = st.date_input("Start date", value=date(2025, 1, 1))
-    end_date = st.date_input("End date", value=date(2025, 1, 1))
+    covid_next_day = date(2020, 3, 12)
+    today = date.today()
+    start_date = st.date_input("Start date", value=covid_next_day)
+    end_date = st.date_input("End date", value=today)
     try:
         available_sensor_ids = _detector_ids()
     except Exception as exc:  # noqa: BLE001

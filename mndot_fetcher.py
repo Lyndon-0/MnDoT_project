@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
-
 import requests
 
 BASE_URL = "https://data.dot.state.mn.us/trafdat/metro"
@@ -162,6 +162,14 @@ def fetch_date_range(
                     session=sess,
                     force=force,
                 )
+            except requests.exceptions.ConnectTimeout as exc:
+                logging.warning("Connect timeout for %s on %s: %s", name, current, exc)
+                errors.append(f"{current} {name}: connection timed out")
+                continue
+            except requests.exceptions.ReadTimeout as exc:
+                logging.warning("Read timeout for %s on %s: %s", name, current, exc)
+                errors.append(f"{current} {name}: read timed out")
+                continue
             except requests.HTTPError as exc:
                 errors.append(f"{current} {name}: {exc}")
                 continue
