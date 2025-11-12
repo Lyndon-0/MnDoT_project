@@ -11,7 +11,7 @@ import numpy as np
 # Base URL for the real upstream service (configure via environment when deployed).
 # If empty, the module will generate mock data so the UI can run end-to-end.
 MN_API_BASE = os.getenv("MNDOT_API_BASE", "").rstrip("/")
-LOCAL_DATA_ROOT = Path(os.getenv("MNDOT_LOCAL_DATA", "data/mndot_raw")).expanduser()
+LOCAL_DATA_ROOT = Path(os.getenv("MNDOT_LOCAL_DATA", "/data/pouya_data/mndot_raw_data/")).expanduser()
 TIMEOUT = 15  # seconds
 
 

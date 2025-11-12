@@ -6,6 +6,8 @@ from datetime import datetime, time
 
 from mndot_api import load_detector_list, fetch_timeseries, rule_flags, constant_run_mask
 
+DETECTOR_CSV_PATH = "data/all_detectors_converted.csv"
+
 st.set_page_config(page_title="MnDOT Detector Monitor — I-94", layout="wide")
 st.title("MnDOT Detector Monitor — I-94")
 st.caption("Click a sensor on the map → fetch 30-sec data → aggregate to 5-min + basic rule checks (ready for MnDOT real-time API).")
@@ -22,7 +24,6 @@ if "dismissed_signature" not in st.session_state:
 
 MINNEAPOLIS_CENTER = (44.9778, -93.2650)
 MINNEAPOLIS_RADIUS_KM = 12.0
-CORRIDOR_CHOICES = ["I-94", "I-35"]
 FLATLINE_SAMPLES = 120  # 120 × 30s steps = 60 minutes
 
 # ======================
@@ -154,12 +155,25 @@ def build_heatmap_long(df_meta_subset: pd.DataFrame,
 # —— Sidebar filters —— #
 with st.sidebar:
     st.header("Filters")
-    df_meta = load_detector_list()
+    df_meta = load_detector_list(DETECTOR_CSV_PATH)
+    corridor_choices = []
+    if "route" in df_meta.columns:
+        corridor_choices = (
+            df_meta["route"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .replace({"": None})
+            .dropna()
+            .unique()
+            .tolist()
+        )
+        corridor_choices = sorted(corridor_choices)
     selected_routes = st.multiselect(
         "Corridor(s)",
-        options=CORRIDOR_CHOICES,
-        default=CORRIDOR_CHOICES,
-        help="Pick one or both corridors to include on the map.",
+        options=corridor_choices,
+        default=corridor_choices,
+        help="Pick one or more corridors (routes) to include on the map.",
     )
     df_corridor_subset = df_meta if not selected_routes else df_meta[df_meta["route"].isin(selected_routes)]
     directions = sorted(df_corridor_subset["direction"].dropna().astype(str).unique().tolist())
@@ -218,7 +232,7 @@ tab_map, tab_kpi = st.tabs(["Map", "KPI"])
 with tab_map:
     st.subheader("① Map / Click a sensor (time-series panel opens here)")
     if df_show.empty:
-        st.warning("No sensors under current filters (use data/I-94_detectors_converted.csv first; replace with the official list later).")
+        st.warning("No sensors under current filters (check data/all_detectors_converted.csv and selected corridors).")
         m = folium.Map(location=[44.97, -93.20], zoom_start=12)
     else:
         m = folium.Map(location=[df_show["lat"].mean(), df_show["lon"].mean()], zoom_start=12)
