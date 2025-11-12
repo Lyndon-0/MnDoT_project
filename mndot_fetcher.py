@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, List, Optional
+import threading
 import requests
 
 BASE_URL = "https://data.dot.state.mn.us/trafdat/metro"
@@ -34,46 +35,66 @@ def _day_url(target_date: date) -> str:
     return f"{BASE_URL}/{target_date:%Y%m%d}/"
 
 
+def _day_directory(base_dir: Path, target_date: date) -> Path:
+    return base_dir / f"{target_date:%Y}" / f"{target_date:%Y%m%d}"
+
+
 def _ensure_storage_dir(base_dir: Path, target_date: date) -> Path:
-    dest = base_dir / f"{target_date:%Y}" / f"{target_date:%Y%m%d}"
+    dest = _day_directory(base_dir, target_date)
     dest.mkdir(parents=True, exist_ok=True)
     return dest
+
+
+def _day_has_files(day_dir: Path) -> bool:
+    if not day_dir.exists():
+        return False
+    try:
+        next(day_dir.iterdir())
+    except StopIteration:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _manifest_path(base_dir: Path) -> Path:
     return base_dir / "download_manifest.csv"
 
 
+_manifest_lock = threading.Lock()
+
+
 def _append_manifest_row(base_dir: Path, result: DownloadResult) -> None:
     manifest = _manifest_path(base_dir)
     is_new = not manifest.exists()
-    with manifest.open("a", newline="") as fh:
-        writer = csv.writer(fh)
-        if is_new:
+    with _manifest_lock:
+        with manifest.open("a", newline="") as fh:
+            writer = csv.writer(fh)
+            if is_new:
+                writer.writerow(
+                    [
+                        "timestamp",
+                        "filename",
+                        "saved",
+                        "skipped",
+                        "size_bytes",
+                        "url",
+                        "path",
+                        "error",
+                    ]
+                )
             writer.writerow(
                 [
-                    "timestamp",
-                    "filename",
-                    "saved",
-                    "skipped",
-                    "size_bytes",
-                    "url",
-                    "path",
-                    "error",
+                    datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    result.filename,
+                    int(result.saved),
+                    int(result.skipped),
+                    result.size,
+                    result.url,
+                    str(result.path),
+                    result.error or "",
                 ]
             )
-        writer.writerow(
-            [
-                datetime.utcnow().isoformat(timespec="seconds") + "Z",
-                result.filename,
-                int(result.saved),
-                int(result.skipped),
-                result.size,
-                result.url,
-                str(result.path),
-                result.error or "",
-            ]
-        )
 
 
 def download_sensor_file(
@@ -150,6 +171,16 @@ def fetch_date_range(
 
         if progress_callback:
             progress_callback(current, 0, len(filenames))
+
+        day_dir = _day_directory(base_dir, current)
+        if _day_has_files(day_dir) and not force:
+            logging.info("Skipping %s because %s already contains files", current, day_dir)
+            skipped += len(filenames)
+            if progress_callback:
+                progress_callback(current, len(filenames), len(filenames))
+            days += 1
+            current = current + timedelta(days=1)
+            continue
 
         for idx, name in enumerate(filenames):
             if progress_callback:
