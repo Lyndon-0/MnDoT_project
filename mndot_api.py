@@ -168,7 +168,7 @@ def _load_local_timeseries(detector_id: str, sensor_type: str, start_ts: datetim
     while day <= end_day:
         year_dir = LOCAL_DATA_ROOT / f"{day:%Y}"
         file_path = year_dir / f"{day:%Y%m%d}" / f"{detector_id}.{sensor_type_slug}.json"
-        print("file_path:", file_path)
+        # print("file_path:", file_path)
         if not file_path.exists():
             return None
         try:
@@ -195,7 +195,7 @@ def _payload_to_dataframe(payload, day: date) -> pd.DataFrame | None:
         if not payload:
             return pd.DataFrame(columns=["ts", "value"])
         start = pd.Timestamp(day, tz="America/Chicago")
-        idx = pd.date_range(start=start, periods=len(payload), freq="30S")
+        idx = pd.date_range(start=start, periods=len(payload), freq="30s")
         values = pd.to_numeric(pd.Series(payload, dtype="float"), errors="coerce")
         df = pd.DataFrame(
             {

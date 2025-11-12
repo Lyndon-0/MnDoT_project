@@ -417,7 +417,7 @@ with tab_map:
                         else:
                             chart = base_line.properties(height=280)
 
-                        st.altair_chart(chart, use_container_width=True)
+                        st.altair_chart(chart, width="stretch")
 
                     flags = rule_flags(df_30s, flat_k=FLATLINE_SAMPLES)
                     c1,c2,c3 = st.columns(3)
@@ -480,6 +480,6 @@ with tab_kpi:
 
         if rows:
             df_rank = pd.DataFrame(rows).sort_values(["severity", "neg", "flat", "zero"], ascending=[False]*4)
-            st.dataframe(df_rank.head(20), use_container_width=True, height=360)
+            st.dataframe(df_rank.head(20), width="stretch", height=360)
         else:
             st.info("No usable data fetched, or the window is too short.")
