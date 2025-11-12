@@ -178,7 +178,9 @@ with st.sidebar:
     df_corridor_subset = df_meta if not selected_routes else df_meta[df_meta["route"].isin(selected_routes)]
     directions = sorted(df_corridor_subset["direction"].dropna().astype(str).unique().tolist())
     direction = st.selectbox("Direction", directions, index=0 if directions else None)
-    sensor_type = st.selectbox("Sensor Type", ["V30 (volume)","C30 (occupancy)","S30 (speed)"], index=0)
+    sensor_options = ["V30 (volume)", "C30 (occupancy)", "S30 (speed)"]
+    default_sensor_idx = next((i for i, label in enumerate(sensor_options) if label.startswith("C30")), 0)
+    sensor_type = st.selectbox("Sensor Type", sensor_options, index=default_sensor_idx)
     sensor_key = {"V30 (volume)":"V30", "C30 (occupancy)":"C30", "S30 (speed)":"S30"}[sensor_type]
 
     today_date = pd.Timestamp.today().date()
