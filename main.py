@@ -31,25 +31,25 @@ def ch():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB)
 
 
-def choose_bucket_seconds(start_date, end_date):
+def choose_bucket_seconds(start_date, end_date) -> int:
     days = (end_date - start_date).days + 1
     if days <= 2:
         return 30
     if days <= 14:
-        return 300
+        return 300       # 5 min
     if days <= 60:
-        return 3600
-    return 86400
+        return 3600      # 1 hour
+    return 86400         # 1 day
 
 
 # ----------------------
 # Queries
 # ----------------------
 @st.cache_data(show_spinner=False)
-def fetch_meta_with_presence(routes, directions, sensor_type_db, start_dt, end_dt):
+def fetch_meta_with_presence(routes, directions, sensor_type_db, start_day, end_day):
     """
-    detector_meta + has_data flag computed in ClickHouse.
-    has_data = exists at least one raw_30s row for (sensor_type, ts range) for that sensor_id.
+    detector_meta + has_data computed in ClickHouse.
+    Uses day range for partition pruning.
     """
     sql = """
         SELECT
@@ -61,14 +61,7 @@ def fetch_meta_with_presence(routes, directions, sensor_type_db, start_dt, end_d
             SELECT sensor_id, count() AS cnt
             FROM raw_30s
             WHERE toString(sensor_type) = {sensor_type:String}
-              AND ts >= {start:DateTime} AND ts <= {end:DateTime}
-              AND sensor_id IN
-              (
-                SELECT sensor_id
-                FROM detector_meta
-                WHERE route IN {routes:Array(String)}
-                  AND direction IN {directions:Array(String)}
-              )
+              AND day >= {start_day:Date} AND day <= {end_day:Date}
             GROUP BY sensor_id
         ) AS d USING (sensor_id)
         WHERE m.route IN {routes:Array(String)}
@@ -81,8 +74,8 @@ def fetch_meta_with_presence(routes, directions, sensor_type_db, start_dt, end_d
             "routes": routes,
             "directions": directions,
             "sensor_type": sensor_type_db,
-            "start": start_dt,
-            "end": end_dt,
+            "start_day": start_day,
+            "end_day": end_day,
         },
     )
 
@@ -121,7 +114,7 @@ def fetch_ts_joined(sensor_id, routes, directions, sensor_type_db, start_dt, end
 
 
 @st.cache_data(show_spinner=False)
-def fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt):
+def fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> int:
     """
     Debug: count raw_30s rows matching filters (server-side).
     """
@@ -173,7 +166,6 @@ def parse_folium_click(ret: dict) -> Tuple[Optional[str], Optional[str]]:
 
     label = ret.get("last_object_clicked_tooltip") or ret.get("last_object_clicked_popup")
     latlng = ret.get("last_object_clicked") or ret.get("last_clicked")
-
     if not label or "(" not in label or ")" not in label:
         return None, None
 
@@ -205,6 +197,9 @@ def handle_sensor_click(sensor_id: str, signature: str) -> None:
 
 
 def manual_open(sensor_id: str, sensor_type_db: str, start_date, end_date, routes, directions) -> None:
+    """
+    Manual open bypasses dismissed-signature guard (useful to reopen same sensor after dismiss).
+    """
     st.session_state.active_sensor_id = str(sensor_id)
     st.session_state.active_signature = (
         f"manual:{sensor_id}:{sensor_type_db}:{start_date}:{end_date}:"
@@ -214,11 +209,25 @@ def manual_open(sensor_id: str, sensor_type_db: str, start_date, end_date, route
 
 
 # ----------------------
+# Cache slots to avoid re-query / rebuild on modal close
+# ----------------------
+if "meta_sig" not in st.session_state:
+    st.session_state.meta_sig = None
+if "df_show" not in st.session_state:
+    st.session_state.df_show = None
+
+if "map_sig" not in st.session_state:
+    st.session_state.map_sig = None
+if "map_obj" not in st.session_state:
+    st.session_state.map_obj = None
+
+
+# ----------------------
 # Page chrome
 # ----------------------
 st.set_page_config(page_title="MnDOT Detector Monitor", layout="wide")
 st.title("MnDOT Detector Monitor")
-st.caption("Markers are blue if data exists under current filters; gray otherwise. Click a marker to view the sensor time series.")
+st.caption("Blue markers have data under current filters; gray markers do not. Click a marker to open the time-series dialog.")
 
 
 # ----------------------
@@ -233,7 +242,6 @@ with st.sidebar:
         "Direction(s)",
         options=DIRECTION_OPTIONS,
         default=DIRECTION_OPTIONS,
-        help="Pick one or more directions to include on the map.",
     )
 
     sensor_label = st.selectbox("Sensor Type", SENSOR_LABELS, index=1)
@@ -253,85 +261,123 @@ with st.sidebar:
     if st.button("Clear cache (debug)"):
         st.cache_data.clear()
         st.cache_resource.clear()
+        # also clear session_state caches
+        st.session_state.meta_sig = None
+        st.session_state.df_show = None
+        st.session_state.map_sig = None
+        st.session_state.map_obj = None
         st.rerun()
 
 if not selected_routes:
     st.warning("No corridors selected.")
     st.stop()
-
 if not selected_directions:
     st.warning("No directions selected.")
     st.stop()
 
 start_dt = datetime.combine(start_date, time.min)
 end_dt = datetime.combine(end_date, time.max)
+start_day = start_date
+end_day = end_date
 
+# A stable signature for "map data state" (used for caching df_show and the map object)
+meta_sig = (
+    tuple(sorted(selected_routes)),
+    tuple(sorted(selected_directions)),
+    sensor_type_db,
+    str(start_date),
+    str(end_date),
+)
 
 # ----------------------
-# Load meta + presence
+# Load meta + presence ONLY when filters change
 # ----------------------
-try:
-    df_show = fetch_meta_with_presence(selected_routes, selected_directions, sensor_type_db, start_dt, end_dt)
-except Exception as e:
-    st.error(f"ClickHouse error while loading detector_meta: {e}")
-    df_show = pd.DataFrame(columns=["sensor_id", "route", "direction", "lat", "lon", "lane", "has_data"])
+if st.session_state.df_show is None or st.session_state.meta_sig != meta_sig:
+    try:
+        st.session_state.df_show = fetch_meta_with_presence(
+            selected_routes, selected_directions, sensor_type_db, start_day, end_day
+        )
+        st.session_state.meta_sig = meta_sig
+    except Exception as e:
+        st.error(f"ClickHouse error while loading detector_meta: {e}")
+        st.session_state.df_show = pd.DataFrame(columns=["sensor_id", "route", "direction", "lat", "lon", "lane", "has_data"])
+        st.session_state.meta_sig = meta_sig
+
+df_show = st.session_state.df_show
 
 if not df_show.empty and "has_data" in df_show.columns:
     st.caption(f"Debug: sensors shown={len(df_show):,}, with_data={int(df_show['has_data'].sum()):,}")
 
 
 # ----------------------
-# Map
+# Build Folium map ONLY when df_show (meta_sig) changes
+# ----------------------
+if st.session_state.map_obj is None or st.session_state.map_sig != meta_sig:
+    if df_show.empty:
+        m = folium.Map(location=[44.97, -93.20], zoom_start=12)
+    else:
+        center_lat = float(pd.to_numeric(df_show["lat"], errors="coerce").mean())
+        center_lon = float(pd.to_numeric(df_show["lon"], errors="coerce").mean())
+        if np.isnan(center_lat) or np.isnan(center_lon):
+            center_lat, center_lon = 44.97, -93.20
+
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+
+        for _, r in df_show.iterrows():
+            sid = str(r.get("sensor_id", "")).strip()
+            try:
+                lat, lon = float(r["lat"]), float(r["lon"])
+            except Exception:
+                continue
+
+            has_data = bool(r.get("has_data", False))
+            color = BLUE if has_data else GRAY
+
+            lane = int(r["lane"]) if pd.notna(r.get("lane")) else None
+            status = "has data" if has_data else "no data"
+            tooltip = f"{r['route']} {r['direction']} lane {lane} ({sid}) — {status}"
+
+            folium.CircleMarker(
+                location=[lat, lon],
+                radius=6,
+                tooltip=tooltip,
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.9,
+            ).add_to(m)
+
+    st.session_state.map_obj = m
+    st.session_state.map_sig = meta_sig
+
+m = st.session_state.map_obj
+
+
+# ----------------------
+# Map (click-only returned objects to avoid reruns on zoom/pan)
 # ----------------------
 st.subheader("Map / Click a sensor (opens time-series panel)")
 
-if df_show.empty:
-    st.warning("No sensors under current filters.")
-    m = folium.Map(location=[44.97, -93.20], zoom_start=12)
-else:
-    center_lat = float(pd.to_numeric(df_show["lat"], errors="coerce").mean())
-    center_lon = float(pd.to_numeric(df_show["lon"], errors="coerce").mean())
-    if np.isnan(center_lat) or np.isnan(center_lon):
-        center_lat, center_lon = 44.97, -93.20
-    m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+ret = st_folium(
+    m,
+    height=700,
+    use_container_width=True,
+    key="mndot_map",
+    returned_objects=[
+        "last_object_clicked_tooltip",
+        "last_object_clicked_popup",
+        "last_object_clicked",
+        "last_clicked",
+    ],
+)
 
-    for _, r in df_show.iterrows():
-        sid = str(r.get("sensor_id", "")).strip()
-        try:
-            lat, lon = float(r["lat"]), float(r["lon"])
-        except Exception:
-            continue
-
-        has_data = bool(r.get("has_data", False))
-        color = BLUE if has_data else GRAY
-
-        lane = int(r["lane"]) if pd.notna(r.get("lane")) else None
-        status = "has data" if has_data else "no data"
-        tooltip = f"{r['route']} {r['direction']} lane {lane} ({sid}) — {status}"
-
-        folium.CircleMarker(
-            location=[lat, lon],
-            radius=6,
-            tooltip=tooltip,
-            color=color,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.9,
-        ).add_to(m)
-
-ret = st_folium(m, height=700, use_container_width=True)
-
-
-# ----------------------
-# Click handling
-# ----------------------
 sensor_id, signature = parse_folium_click(ret)
 if sensor_id and signature:
     handle_sensor_click(sensor_id, signature)
 
 
 # ----------------------
-# Manual open button
+# Manual open button (optional; allows reopening after dismiss)
 # ----------------------
 default_target = None
 if st.session_state.active_sensor_id:
@@ -347,6 +393,8 @@ with btn_col:
 
 # ----------------------
 # Time-series dialog
+# Query happens ONLY when modal is open (i.e., only after a click/manual open).
+# Closing modal triggers a rerun, but df_show + map are reused; no requery/rebuild.
 # ----------------------
 if st.session_state.show_ts_modal and st.session_state.active_sensor_id:
     @st.dialog("\u00A0", width="large", on_dismiss=dismiss_ts_modal)
@@ -362,28 +410,18 @@ if st.session_state.show_ts_modal and st.session_state.active_sensor_id:
             f"**Bucket:** `{bucket_s}s`"
         )
 
-        try:
-            raw_rows = fetch_raw_count(sid, selected_routes, selected_directions, sensor_type_db, start_dt, end_dt)
-        except Exception as e:
-            st.error(f"Debug COUNT query failed: {e}")
-            raw_rows = None
+        # Debug counts (remove if you don't want any extra queries)
+        raw_rows = fetch_raw_count(sid, selected_routes, selected_directions, sensor_type_db, start_dt, end_dt)
 
-        try:
-            df_ts = fetch_ts_joined(
-                sid, selected_routes, selected_directions, sensor_type_db, start_dt, end_dt, bucket_s
-            )
-        except Exception as e:
-            st.error(f"ClickHouse error while loading time-series: {e}")
-            return
+        df_ts = fetch_ts_joined(
+            sid, selected_routes, selected_directions, sensor_type_db, start_dt, end_dt, bucket_s
+        )
 
-        st.caption(f"Debug: raw rows matching filters = {raw_rows:,}" if raw_rows is not None else "Debug: raw rows matching filters = (error)")
+        st.caption(f"Debug: raw rows matching filters = {raw_rows:,}")
         st.caption(f"Debug: chart points returned (aggregated) = {len(df_ts):,}")
 
         if df_ts.empty:
             st.warning("No time-series rows returned for this sensor under the current filters/range.")
-            if st.button("Close"):
-                dismiss_ts_modal()
-                st.rerun()
             return
 
         df_ts["ts"] = pd.to_datetime(df_ts["ts"])
@@ -398,15 +436,5 @@ if st.session_state.show_ts_modal and st.session_state.active_sensor_id:
             .properties(height=320)
         )
         st.altair_chart(chart, use_container_width=True)
-
-        vals = df_ts["value"].dropna()
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Negative values present", "Yes" if (len(vals) and (vals < 0).any()) else "No")
-        c2.metric("All zero", "Yes" if (len(vals) and (vals == 0).all()) else "No")
-        c3.metric("Non-null points", f"{len(vals):,}")
-
-        if st.button("Close"):
-            dismiss_ts_modal()
-            st.rerun()
 
     time_series_dialog()
