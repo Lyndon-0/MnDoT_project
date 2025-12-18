@@ -14,6 +14,7 @@ from .backend import (
     fetch_con_zero_vol,
     fetch_meta_with_presence,
     fetch_neg_vol_cnt,
+    fetch_occ_lock_on,
     fetch_raw_count,
     fetch_ts_joined,
     meta_cache_key,
@@ -328,6 +329,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 neg_occ_cnt = int(cached_neg_occ)
 
+            lock_on_key = f"metric:occLockOn:{occ_key_base}"
+            cached_lock_on = cache.get(lock_on_key)
+            if cached_lock_on is None:
+                occ_lock_on = fetch_occ_lock_on(sensor_id, routes, directions, occ_sensor_type_db, start_dt, end_dt)
+                cache.set(lock_on_key, int(occ_lock_on))
+            else:
+                occ_lock_on = int(cached_lock_on)
+
             neg_key = f"metric:negVolCnt:{metrics_key_base}"
             cached_neg = cache.get(neg_key)
             if cached_neg is None:
@@ -374,6 +383,13 @@ def register_callbacks(app, cache) -> None:
             con_occ_line = f"conZeroOcc: {con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
 
         neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
-        metrics = [html.Div(con_zero_line), html.Div(neg_line), html.Div(con_occ_line), html.Div(neg_occ_line)]
+        lock_on_line = f"occLockOn: {occ_lock_on} slots/day (max over range, c30)"
+        metrics = [
+            html.Div(con_zero_line),
+            html.Div(neg_line),
+            html.Div(con_occ_line),
+            html.Div(neg_occ_line),
+            html.Div(lock_on_line),
+        ]
 
         return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics

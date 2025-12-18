@@ -209,6 +209,49 @@ def fetch_neg_vol_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, e
     return int(df["negVolCnt"].iloc[0])
 
 
+def fetch_occ_lock_on(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> int:
+    """
+    occLockOn: for each day in range, count 30s slots where 99 < value <= 100; return the maximum daily count.
+    Intended for occupancy (c30).
+    """
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
+    sql = """
+        SELECT ifNull(max(lock_cnt), 0) AS occLockOn
+        FROM
+        (
+            SELECT r.day AS day, countIf((ifNull(r.value, -1) >= 99) AND (ifNull(r.value, -1) <= 100)) AS lock_cnt
+            FROM raw_30s AS r
+            INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+            WHERE r.sensor_id = {sensor_id:String}
+              AND toString(r.sensor_type) = {sensor_type:String}
+              AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
+              AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
+              AND m.route IN {routes:Array(String)}
+              AND m.direction IN {directions:Array(String)}
+            GROUP BY day
+        )
+    """
+
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "sensor_type": str(sensor_type_db),
+            "start_day": start_day,
+            "end_day": end_day,
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0
+    return int(df["occLockOn"].iloc[0])
+
+
 def meta_cache_key(routes, directions, sensor_type_db, start_day, end_day) -> str:
     payload = {
         "routes": list(routes),
