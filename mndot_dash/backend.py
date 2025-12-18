@@ -252,6 +252,59 @@ def fetch_occ_lock_on(sensor_id, routes, directions, sensor_type_db, start_dt, e
     return int(df["occLockOn"].iloc[0])
 
 
+def fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt, vol_sensor_type_db: str = "v30", occ_sensor_type_db: str = "c30") -> int:
+    """
+    zvolOnOcc: for each day in range, count 30s slots where volume is zero (v30) while occupancy is non-zero (c30);
+    return the maximum daily count.
+    """
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
+    sql = """
+        SELECT ifNull(max(z_cnt), 0) AS zvolOnOcc
+        FROM
+        (
+            SELECT day, countIf((vol = 0) AND (occ > 0)) AS z_cnt
+            FROM
+            (
+                SELECT
+                    r.day AS day,
+                    r.ts AS ts,
+                    anyIf(r.value, toString(r.sensor_type) = {vol_type:String}) AS vol,
+                    anyIf(r.value, toString(r.sensor_type) = {occ_type:String}) AS occ
+                FROM raw_30s AS r
+                INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                WHERE r.sensor_id = {sensor_id:String}
+                  AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
+                  AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
+                  AND (toString(r.sensor_type) = {vol_type:String} OR toString(r.sensor_type) = {occ_type:String})
+                  AND m.route IN {routes:Array(String)}
+                  AND m.direction IN {directions:Array(String)}
+                GROUP BY day, ts
+            )
+            GROUP BY day
+        )
+    """
+
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "vol_type": str(vol_sensor_type_db),
+            "occ_type": str(occ_sensor_type_db),
+            "start_day": start_day,
+            "end_day": end_day,
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0
+    return int(df["zvolOnOcc"].iloc[0])
+
+
 def meta_cache_key(routes, directions, sensor_type_db, start_day, end_day) -> str:
     payload = {
         "routes": list(routes),

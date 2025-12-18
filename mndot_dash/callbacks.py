@@ -17,6 +17,7 @@ from .backend import (
     fetch_occ_lock_on,
     fetch_raw_count,
     fetch_ts_joined,
+    fetch_zvol_on_occ,
     meta_cache_key,
     ts_cache_key,
 )
@@ -337,6 +338,23 @@ def register_callbacks(app, cache) -> None:
             else:
                 occ_lock_on = int(cached_lock_on)
 
+            z_key_base = ts_cache_key(
+                sensor_id,
+                tuple(sorted(routes)),
+                tuple(sorted(directions)),
+                "v30+c30",
+                start_dt,
+                end_dt,
+                30,
+            )
+            z_key = f"metric:zvolOnOcc:{z_key_base}"
+            cached_z = cache.get(z_key)
+            if cached_z is None:
+                zvol_on_occ = fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt)
+                cache.set(z_key, int(zvol_on_occ))
+            else:
+                zvol_on_occ = int(cached_z)
+
             neg_key = f"metric:negVolCnt:{metrics_key_base}"
             cached_neg = cache.get(neg_key)
             if cached_neg is None:
@@ -384,12 +402,14 @@ def register_callbacks(app, cache) -> None:
 
         neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
         lock_on_line = f"occLockOn: {occ_lock_on} slots/day (max over range, c30)"
+        zvol_on_occ_line = f"zvolOnOcc: {zvol_on_occ} slots/day (max over range, v30==0 & c30>0)"
         metrics = [
             html.Div(con_zero_line),
             html.Div(neg_line),
             html.Div(con_occ_line),
             html.Div(neg_occ_line),
             html.Div(lock_on_line),
+            html.Div(zvol_on_occ_line),
         ]
 
         return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics
