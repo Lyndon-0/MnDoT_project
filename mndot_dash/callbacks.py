@@ -6,13 +6,14 @@ import pandas as pd
 import plotly.graph_objects as go
 
 import dash
-from dash import Input, Output, State, no_update
+from dash import Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
 from .backend import (
     choose_bucket_seconds,
     fetch_con_zero_vol,
     fetch_meta_with_presence,
+    fetch_neg_vol_cnt,
     fetch_raw_count,
     fetch_ts_joined,
     meta_cache_key,
@@ -234,6 +235,7 @@ def register_callbacks(app, cache) -> None:
             return "Time series", "", "", True, "End date must be on or after the start date.", go.Figure(), ""
 
         sensor_type_db = UI2DB_SENSOR[sensor_label]
+        metrics_sensor_type_db = "v30"
         start_dt = datetime.combine(start_date, dtime.min)
         end_dt = datetime.combine(end_date, dtime.max)
         bucket_s = choose_bucket_seconds(start_date, end_date)
@@ -268,20 +270,38 @@ def register_callbacks(app, cache) -> None:
                 if not df_ts.empty:
                     df_ts["ts"] = pd.to_datetime(df_ts["ts"])
 
-            metric_key = f"metric:conZeroVol:{ts_key}"
+            metrics_key_base = ts_cache_key(
+                sensor_id,
+                tuple(sorted(routes)),
+                tuple(sorted(directions)),
+                metrics_sensor_type_db,
+                start_dt,
+                end_dt,
+                30,
+            )
+
+            metric_key = f"metric:conZeroVol:{metrics_key_base}"
             cached_metric = cache.get(metric_key)
             if cached_metric is None:
                 con_zero_vol = fetch_con_zero_vol(
                     sensor_id,
                     routes,
                     directions,
-                    sensor_type_db,
+                    metrics_sensor_type_db,
                     start_dt,
                     end_dt,
                 )
                 cache.set(metric_key, int(con_zero_vol))
             else:
                 con_zero_vol = int(cached_metric)
+
+            neg_key = f"metric:negVolCnt:{metrics_key_base}"
+            cached_neg = cache.get(neg_key)
+            if cached_neg is None:
+                neg_vol_cnt = fetch_neg_vol_cnt(sensor_id, routes, directions, metrics_sensor_type_db, start_dt, end_dt)
+                cache.set(neg_key, int(neg_vol_cnt))
+            else:
+                neg_vol_cnt = int(cached_neg)
 
         except Exception as e:
             return (
@@ -309,8 +329,11 @@ def register_callbacks(app, cache) -> None:
 
         fig = build_ts_figure(df_ts, sensor_type_db)
         if con_zero_vol <= 0:
-            metrics = "conZeroVol: 0 (no ≥10 minute all-zero run)"
+            con_zero_line = "conZeroVol: 0 (no ≥10 minute all-zero run, v30)"
         else:
-            metrics = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes)"
+            con_zero_line = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
+
+        neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
+        metrics = [html.Div(con_zero_line), html.Div(neg_line)]
 
         return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics
