@@ -236,6 +236,7 @@ def register_callbacks(app, cache) -> None:
 
         sensor_type_db = UI2DB_SENSOR[sensor_label]
         metrics_sensor_type_db = "v30"
+        occ_sensor_type_db = "c30"
         start_dt = datetime.combine(start_date, dtime.min)
         end_dt = datetime.combine(end_date, dtime.max)
         bucket_s = choose_bucket_seconds(start_date, end_date)
@@ -295,6 +296,30 @@ def register_callbacks(app, cache) -> None:
             else:
                 con_zero_vol = int(cached_metric)
 
+            occ_key_base = ts_cache_key(
+                sensor_id,
+                tuple(sorted(routes)),
+                tuple(sorted(directions)),
+                occ_sensor_type_db,
+                start_dt,
+                end_dt,
+                30,
+            )
+            occ_key = f"metric:conZeroOcc:{occ_key_base}"
+            cached_occ = cache.get(occ_key)
+            if cached_occ is None:
+                con_zero_occ = fetch_con_zero_vol(
+                    sensor_id,
+                    routes,
+                    directions,
+                    occ_sensor_type_db,
+                    start_dt,
+                    end_dt,
+                )
+                cache.set(occ_key, int(con_zero_occ))
+            else:
+                con_zero_occ = int(cached_occ)
+
             neg_key = f"metric:negVolCnt:{metrics_key_base}"
             cached_neg = cache.get(neg_key)
             if cached_neg is None:
@@ -333,7 +358,12 @@ def register_callbacks(app, cache) -> None:
         else:
             con_zero_line = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
 
+        if con_zero_occ <= 0:
+            con_occ_line = "conZeroOcc: 0 (no ≥10 minute all-zero run, c30)"
+        else:
+            con_occ_line = f"conZeroOcc: {con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
+
         neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
-        metrics = [html.Div(con_zero_line), html.Div(neg_line)]
+        metrics = [html.Div(con_zero_line), html.Div(con_occ_line), html.Div(neg_line)]
 
         return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics
