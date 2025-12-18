@@ -12,6 +12,7 @@ from dash.exceptions import PreventUpdate
 from .backend import (
     choose_bucket_seconds,
     fetch_con_zero_vol,
+    fetch_over_cnt,
     fetch_meta_with_presence,
     fetch_neg_vol_cnt,
     fetch_occ_lock_on,
@@ -338,6 +339,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 occ_lock_on = int(cached_lock_on)
 
+            over_key = f"metric:overCnt:{metrics_key_base}"
+            cached_over = cache.get(over_key)
+            if cached_over is None:
+                over_cnt = fetch_over_cnt(sensor_id, routes, directions, metrics_sensor_type_db, start_dt, end_dt)
+                cache.set(over_key, int(over_cnt))
+            else:
+                over_cnt = int(cached_over)
+
             z_key_base = ts_cache_key(
                 sensor_id,
                 tuple(sorted(routes)),
@@ -394,6 +403,7 @@ def register_callbacks(app, cache) -> None:
             con_zero_line = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
 
         neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
+        over_line = f"overCnt: {over_cnt} slots/day (max over range, v30; 25<vol<128)"
 
         if con_zero_occ <= 0:
             con_occ_line = "conZeroOcc: 0 (no ≥10 minute all-zero run, c30)"
@@ -406,6 +416,7 @@ def register_callbacks(app, cache) -> None:
         metrics = [
             html.Div(con_zero_line),
             html.Div(neg_line),
+            html.Div(over_line),
             html.Div(con_occ_line),
             html.Div(neg_occ_line),
             html.Div(lock_on_line),
