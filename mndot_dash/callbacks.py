@@ -13,6 +13,7 @@ from .backend import (
     choose_bucket_seconds,
     fetch_con_zero_vol,
     fetch_const_vol,
+    fetch_const_occ,
     fetch_over_cnt,
     fetch_high_occ,
     fetch_meta_with_presence,
@@ -325,6 +326,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 con_zero_occ = int(cached_occ)
 
+            const_occ_key = f"metric:constOcc:{occ_key_base}"
+            cached_const_occ = cache.get(const_occ_key)
+            if cached_const_occ is None:
+                const_occ = fetch_const_occ(sensor_id, routes, directions, occ_sensor_type_db, start_dt, end_dt)
+                cache.set(const_occ_key, int(const_occ))
+            else:
+                const_occ = int(cached_const_occ)
+
             neg_occ_key = f"metric:negOccCnt:{occ_key_base}"
             cached_neg_occ = cache.get(neg_occ_key)
             if cached_neg_occ is None:
@@ -432,6 +441,11 @@ def register_callbacks(app, cache) -> None:
         else:
             con_occ_line = f"conZeroOcc: {con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
 
+        if const_occ <= 0:
+            const_occ_line = "constOcc: 0 (no ≥10 minute constant run, c30; 0.2<occ<100)"
+        else:
+            const_occ_line = f"constOcc: {const_occ} slots ({const_occ / 2:.1f} minutes, c30; 0.2<occ<100)"
+
         neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
         lock_on_line = f"occLockOn: {occ_lock_on} slots/day (max over range, c30)"
         high_occ_line = f"highOcc: {high_occ} slots/day (max over range, c30; occ>35)"
@@ -442,6 +456,7 @@ def register_callbacks(app, cache) -> None:
             html.Div(over_line),
             html.Div(const_line),
             html.Div(con_occ_line),
+            html.Div(const_occ_line),
             html.Div(neg_occ_line),
             html.Div(lock_on_line),
             html.Div(high_occ_line),
