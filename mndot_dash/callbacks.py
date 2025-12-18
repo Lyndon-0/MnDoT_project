@@ -13,6 +13,7 @@ from .backend import (
     choose_bucket_seconds,
     fetch_con_zero_vol,
     fetch_over_cnt,
+    fetch_high_occ,
     fetch_meta_with_presence,
     fetch_neg_vol_cnt,
     fetch_occ_lock_on,
@@ -339,6 +340,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 occ_lock_on = int(cached_lock_on)
 
+            high_occ_key = f"metric:highOcc:{occ_key_base}"
+            cached_high_occ = cache.get(high_occ_key)
+            if cached_high_occ is None:
+                high_occ = fetch_high_occ(sensor_id, routes, directions, occ_sensor_type_db, start_dt, end_dt)
+                cache.set(high_occ_key, int(high_occ))
+            else:
+                high_occ = int(cached_high_occ)
+
             over_key = f"metric:overCnt:{metrics_key_base}"
             cached_over = cache.get(over_key)
             if cached_over is None:
@@ -412,6 +421,7 @@ def register_callbacks(app, cache) -> None:
 
         neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
         lock_on_line = f"occLockOn: {occ_lock_on} slots/day (max over range, c30)"
+        high_occ_line = f"highOcc: {high_occ} slots/day (max over range, c30; occ>35)"
         zvol_on_occ_line = f"zvolOnOcc: {zvol_on_occ} slots/day (max over range, v30==0 & c30>0)"
         metrics = [
             html.Div(con_zero_line),
@@ -420,6 +430,7 @@ def register_callbacks(app, cache) -> None:
             html.Div(con_occ_line),
             html.Div(neg_occ_line),
             html.Div(lock_on_line),
+            html.Div(high_occ_line),
             html.Div(zvol_on_occ_line),
         ]
 
