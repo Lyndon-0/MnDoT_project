@@ -305,6 +305,69 @@ def fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt, vol_senso
     return int(df["zvolOnOcc"].iloc[0])
 
 
+def fetch_vol_on_low_occ(
+    sensor_id,
+    routes,
+    directions,
+    start_dt,
+    end_dt,
+    vol_sensor_type_db: str = "v30",
+    occ_sensor_type_db: str = "c30",
+    occ_threshold: float = 0.2,
+) -> int:
+    """
+    volOnLowOcc: for each day in range, count 30s slots where volume > 1 (v30) while occupancy <= occ_threshold (c30);
+    return the maximum daily count.
+    """
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
+    sql = """
+        SELECT ifNull(max(cnt), 0) AS volOnLowOcc
+        FROM
+        (
+            SELECT day, countIf((ifNull(vol, -1) > 1) AND (ifNull(occ, 999) <= {occ_threshold:Float64})) AS cnt
+            FROM
+            (
+                SELECT
+                    r.day AS day,
+                    r.ts AS ts,
+                    anyIf(r.value, toString(r.sensor_type) = {vol_type:String}) AS vol,
+                    anyIf(r.value, toString(r.sensor_type) = {occ_type:String}) AS occ
+                FROM raw_30s AS r
+                INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                WHERE r.sensor_id = {sensor_id:String}
+                  AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
+                  AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
+                  AND (toString(r.sensor_type) = {vol_type:String} OR toString(r.sensor_type) = {occ_type:String})
+                  AND m.route IN {routes:Array(String)}
+                  AND m.direction IN {directions:Array(String)}
+                GROUP BY day, ts
+            )
+            GROUP BY day
+        )
+    """
+
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "vol_type": str(vol_sensor_type_db),
+            "occ_type": str(occ_sensor_type_db),
+            "occ_threshold": float(occ_threshold),
+            "start_day": start_day,
+            "end_day": end_day,
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0
+    return int(df["volOnLowOcc"].iloc[0])
+
+
 def fetch_over_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> int:
     """
     overCnt: for each day in range, count 30s slots where 25 < value < 128; return the maximum daily count.
