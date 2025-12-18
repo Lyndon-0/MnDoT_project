@@ -13,7 +13,6 @@ import clickhouse_connect
 BASE_DIR = Path("/data/pouya_data/mndot_raw_data")
 DETECTORS_CSV = Path("/home/MnDoT_project/preprocess/detectors_minneapolis_radius_25.0km.csv")
 YEAR = 2020
-MONTH = 3  # March
 
 CH_HOST = "127.0.0.1"
 CH_PORT = 8123
@@ -120,6 +119,20 @@ def iter_month_day_folders(base_dir: Path, year: int, month: int):
             yield parse_day_folder_yyyymmdd(name), p
 
 
+def iter_year_day_folders(base_dir: Path, year: int):
+    year_dir = base_dir / str(year)
+    if not year_dir.exists():
+        raise FileNotFoundError(f"Year directory not found: {year_dir}")
+
+    prefix = str(year)  # e.g., "2020"
+    for p in sorted(year_dir.iterdir()):
+        if not p.is_dir():
+            continue
+        name = p.name
+        if len(name) == 8 and name.startswith(prefix) and name.isdigit():
+            yield parse_day_folder_yyyymmdd(name), p
+
+
 def get_sensors_client():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=DB)
 
@@ -127,7 +140,7 @@ def get_sensors_client():
 # -----------------------------
 # Main ingestion
 # -----------------------------
-def ingest_march_2020(allowed_sensors: set[str]):
+def ingest_year(allowed_sensors: set[str], year: int = YEAR):
     client = get_sensors_client()
 
     batch = []
@@ -138,7 +151,7 @@ def ingest_march_2020(allowed_sensors: set[str]):
         # "wait_for_async_insert": 1,
     }
 
-    for day, folder in iter_month_day_folders(BASE_DIR, YEAR, MONTH):
+    for day, folder in iter_year_day_folders(BASE_DIR, year):
         for json_path in folder.glob("*.json"):
             # robust split in case sensor_id has dots
             sensor_id, _, _ = json_path.name.rsplit(".", 2)
@@ -167,4 +180,4 @@ def ingest_march_2020(allowed_sensors: set[str]):
 if __name__ == "__main__":
     ensure_schema()
     allowed = load_allowed_sensors(DETECTORS_CSV)
-    ingest_march_2020(allowed)
+    ingest_year(allowed, YEAR)
