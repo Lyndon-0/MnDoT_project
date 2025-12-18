@@ -12,6 +12,7 @@ from dash.exceptions import PreventUpdate
 from .backend import (
     choose_bucket_seconds,
     fetch_con_zero_vol,
+    fetch_const_vol,
     fetch_over_cnt,
     fetch_high_occ,
     fetch_meta_with_presence,
@@ -356,6 +357,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 over_cnt = int(cached_over)
 
+            const_key = f"metric:constVol:{metrics_key_base}"
+            cached_const = cache.get(const_key)
+            if cached_const is None:
+                const_vol = fetch_const_vol(sensor_id, routes, directions, metrics_sensor_type_db, start_dt, end_dt)
+                cache.set(const_key, int(const_vol))
+            else:
+                const_vol = int(cached_const)
+
             z_key_base = ts_cache_key(
                 sensor_id,
                 tuple(sorted(routes)),
@@ -413,6 +422,10 @@ def register_callbacks(app, cache) -> None:
 
         neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
         over_line = f"overCnt: {over_cnt} slots/day (max over range, v30; 25<vol<128)"
+        if const_vol <= 0:
+            const_line = "constVol: 0 (no ≥10 minute constant run, v30; 0<vol<128)"
+        else:
+            const_line = f"constVol: {const_vol} slots ({const_vol / 2:.1f} minutes, v30; 0<vol<128)"
 
         if con_zero_occ <= 0:
             con_occ_line = "conZeroOcc: 0 (no ≥10 minute all-zero run, c30)"
@@ -427,6 +440,7 @@ def register_callbacks(app, cache) -> None:
             html.Div(con_zero_line),
             html.Div(neg_line),
             html.Div(over_line),
+            html.Div(const_line),
             html.Div(con_occ_line),
             html.Div(neg_occ_line),
             html.Div(lock_on_line),

@@ -391,6 +391,90 @@ def fetch_high_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end_
     return int(df["highOcc"].iloc[0])
 
 
+def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt, min_run_slots: int = 20) -> int:
+    """
+    constVol: maximum length (in 30s slots) of a consecutive run where volume stays constant
+    and 0 < volume < 128. Runs shorter than min_run_slots are ignored (default: 20 slots = 10 minutes).
+    Returns the maximum over all days in the range.
+    Intended for v30.
+    """
+    min_run_slots = int(min_run_slots)
+    if min_run_slots <= 0:
+        raise ValueError("min_run_slots must be >= 1")
+
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
+    sql = f"""
+        SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constVol
+        FROM
+        (
+            SELECT day, grp, count() AS run_len
+            FROM
+            (
+                SELECT
+                    day,
+                    ts,
+                    ok,
+                    sum(toUInt8(boundary)) OVER (PARTITION BY day ORDER BY ts) AS grp
+                FROM
+                (
+                    SELECT
+                        r.day AS day,
+                        r.ts AS ts,
+                        (ifNull(r.value, -1) > 0 AND ifNull(r.value, -1) < 128) AS ok,
+                        (
+                            ((ifNull(r.value, -1) > 0 AND ifNull(r.value, -1) < 128) != prev_ok)
+                            OR (
+                                (ifNull(r.value, -1) > 0 AND ifNull(r.value, -1) < 128)
+                                AND prev_ok
+                                AND (ifNull(r.value, -1) != prev_val)
+                            )
+                        ) AS boundary
+                    FROM
+                    (
+                        SELECT
+                            r.day AS day,
+                            r.ts AS ts,
+                            r.value AS value,
+                            lagInFrame((ifNull(r.value, -1) > 0 AND ifNull(r.value, -1) < 128), 1, 0)
+                                OVER (PARTITION BY r.day ORDER BY r.ts) AS prev_ok,
+                            lagInFrame(ifNull(r.value, -1), 1, -1)
+                                OVER (PARTITION BY r.day ORDER BY r.ts) AS prev_val
+                        FROM raw_30s AS r
+                        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                        WHERE r.sensor_id = {{sensor_id:String}}
+                          AND toString(r.sensor_type) = {{sensor_type:String}}
+                          AND r.day >= {{start_day:Date}} AND r.day <= {{end_day:Date}}
+                          AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
+                          AND m.route IN {{routes:Array(String)}}
+                          AND m.direction IN {{directions:Array(String)}}
+                    ) AS r
+                )
+            )
+            WHERE ok
+            GROUP BY day, grp
+        )
+    """
+
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "sensor_type": str(sensor_type_db),
+            "start_day": start_day,
+            "end_day": end_day,
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0
+    return int(df["constVol"].iloc[0])
+
+
 def meta_cache_key(routes, directions, sensor_type_db, start_day, end_day) -> str:
     payload = {
         "routes": list(routes),
