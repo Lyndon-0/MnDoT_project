@@ -109,6 +109,64 @@ def fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end
     return int(df["raw_rows"].iloc[0]) if not df.empty else 0
 
 
+def fetch_con_zero_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt, min_run_slots: int = 20) -> int:
+    """
+    conZeroVol: maximum length of a consecutive run of 30s slots where value == 0.
+    Runs shorter than min_run_slots are ignored (default: 20 slots = 10 minutes).
+    """
+    min_run_slots = int(min_run_slots)
+    if min_run_slots <= 0:
+        raise ValueError("min_run_slots must be >= 1")
+
+    sql = f"""
+        SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS conZeroVol
+        FROM
+        (
+            SELECT day, grp, count() AS run_len
+            FROM
+            (
+                SELECT
+                    day,
+                    ts,
+                    is_zero,
+                    sum(toUInt8(is_zero != prev_is_zero)) OVER (PARTITION BY day ORDER BY ts) AS grp
+                FROM
+                (
+                    SELECT
+                        toDate(r.ts) AS day,
+                        r.ts AS ts,
+                        (ifNull(r.value, 1) = 0) AS is_zero,
+                        lagInFrame((ifNull(r.value, 1) = 0), 1, 0) OVER (PARTITION BY toDate(r.ts) ORDER BY r.ts) AS prev_is_zero
+                    FROM raw_30s AS r
+                    INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                    WHERE r.sensor_id = {{sensor_id:String}}
+                      AND toString(r.sensor_type) = {{sensor_type:String}}
+                      AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
+                      AND m.route IN {{routes:Array(String)}}
+                      AND m.direction IN {{directions:Array(String)}}
+                )
+            )
+            WHERE is_zero
+            GROUP BY day, grp
+        )
+    """
+
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "sensor_type": str(sensor_type_db),
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0
+    return int(df["conZeroVol"].iloc[0])
+
+
 def meta_cache_key(routes, directions, sensor_type_db, start_day, end_day) -> str:
     payload = {
         "routes": list(routes),
@@ -131,4 +189,3 @@ def ts_cache_key(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt
         "bucket_s": int(bucket_s),
     }
     return "ts:" + json.dumps(payload, sort_keys=True)
-

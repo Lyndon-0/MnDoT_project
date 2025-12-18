@@ -11,6 +11,7 @@ from dash.exceptions import PreventUpdate
 
 from .backend import (
     choose_bucket_seconds,
+    fetch_con_zero_vol,
     fetch_meta_with_presence,
     fetch_raw_count,
     fetch_ts_joined,
@@ -211,6 +212,7 @@ def register_callbacks(app, cache) -> None:
         Output("ts-modal-alert", "is_open"),
         Output("ts-modal-alert", "children"),
         Output("ts-graph", "figure"),
+        Output("ts-modal-metrics", "children"),
         Input("ts-modal", "is_open"),
         State("active-sensor-store", "data"),
         State("corridors", "value"),
@@ -220,16 +222,16 @@ def register_callbacks(app, cache) -> None:
     )
     def update_ts_modal(is_open, sensor_id, corridors, sensor_label, start_date_s, end_date_s):
         if not is_open or not sensor_id:
-            return "", "", "", False, "", go.Figure()
+            return "", "", "", False, "", go.Figure(), ""
 
         corridors_norm, routes, directions = split_corridors(corridors)
         if not corridors_norm:
-            return "Time series", "", "", True, "A corridor must be selected.", go.Figure()
+            return "Time series", "", "", True, "A corridor must be selected.", go.Figure(), ""
 
         start_date = date.fromisoformat(start_date_s)
         end_date = date.fromisoformat(end_date_s)
         if end_date < start_date:
-            return "Time series", "", "", True, "End date must be on or after the start date.", go.Figure()
+            return "Time series", "", "", True, "End date must be on or after the start date.", go.Figure(), ""
 
         sensor_type_db = UI2DB_SENSOR[sensor_label]
         start_dt = datetime.combine(start_date, dtime.min)
@@ -266,6 +268,21 @@ def register_callbacks(app, cache) -> None:
                 if not df_ts.empty:
                     df_ts["ts"] = pd.to_datetime(df_ts["ts"])
 
+            metric_key = f"metric:conZeroVol:{ts_key}"
+            cached_metric = cache.get(metric_key)
+            if cached_metric is None:
+                con_zero_vol = fetch_con_zero_vol(
+                    sensor_id,
+                    routes,
+                    directions,
+                    sensor_type_db,
+                    start_dt,
+                    end_dt,
+                )
+                cache.set(metric_key, int(con_zero_vol))
+            else:
+                con_zero_vol = int(cached_metric)
+
         except Exception as e:
             return (
                 f"Detector {sensor_id}",
@@ -274,6 +291,7 @@ def register_callbacks(app, cache) -> None:
                 True,
                 f"ClickHouse error while loading time series: {e}",
                 go.Figure(),
+                "",
             )
 
         debug = f"Debug: raw rows matching filters = {raw_rows:,} | chart points returned (aggregated) = {len(df_ts):,}"
@@ -286,7 +304,13 @@ def register_callbacks(app, cache) -> None:
                 True,
                 "No time-series rows returned for this sensor under the current filters/range.",
                 go.Figure(),
+                "",
             )
 
         fig = build_ts_figure(df_ts, sensor_type_db)
-        return f"Detector {sensor_id}", meta_line, debug, False, "", fig
+        if con_zero_vol <= 0:
+            metrics = "conZeroVol: 0 (no ≥10 minute all-zero run)"
+        else:
+            metrics = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes)"
+
+        return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics

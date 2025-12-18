@@ -148,6 +148,7 @@ def build_layout() -> dbc.Container:
                                 figure=go.Figure(),
                                 config={"displayModeBar": False},
                             ),
+                            html.Div(id="ts-modal-metrics", style={"marginTop": "10px"}),
                         ]
                     ),
                 ],
