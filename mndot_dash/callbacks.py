@@ -320,6 +320,14 @@ def register_callbacks(app, cache) -> None:
             else:
                 con_zero_occ = int(cached_occ)
 
+            neg_occ_key = f"metric:negOccCnt:{occ_key_base}"
+            cached_neg_occ = cache.get(neg_occ_key)
+            if cached_neg_occ is None:
+                neg_occ_cnt = fetch_neg_vol_cnt(sensor_id, routes, directions, occ_sensor_type_db, start_dt, end_dt)
+                cache.set(neg_occ_key, int(neg_occ_cnt))
+            else:
+                neg_occ_cnt = int(cached_neg_occ)
+
             neg_key = f"metric:negVolCnt:{metrics_key_base}"
             cached_neg = cache.get(neg_key)
             if cached_neg is None:
@@ -358,12 +366,14 @@ def register_callbacks(app, cache) -> None:
         else:
             con_zero_line = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
 
+        neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
+
         if con_zero_occ <= 0:
             con_occ_line = "conZeroOcc: 0 (no ≥10 minute all-zero run, c30)"
         else:
             con_occ_line = f"conZeroOcc: {con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
 
-        neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
-        metrics = [html.Div(con_zero_line), html.Div(con_occ_line), html.Div(neg_line)]
+        neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
+        metrics = [html.Div(con_zero_line), html.Div(neg_line), html.Div(con_occ_line), html.Div(neg_occ_line)]
 
         return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics
