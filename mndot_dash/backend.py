@@ -1,7 +1,7 @@
 import json
 from datetime import date
 from functools import lru_cache
-from typing import Optional
+from typing import Dict, Iterable, Optional
 
 import pandas as pd
 
@@ -55,6 +55,58 @@ def fetch_precomputed_metric(metric: str, sensor_id, start_day: date, end_day: d
     if pd.isna(value):
         return None
     return int(value)
+
+
+def fetch_precomputed_metrics_for_sensors(
+    sensor_ids: Iterable,
+    start_day: date,
+    end_day: date,
+) -> Dict[str, Dict[str, int]]:
+    """
+    Bulk version: returns {sensor_id: {metric: value}} using max(value) across the day range.
+    Falls back to an empty dict on error.
+    """
+    sensor_id_list = [str(s) for s in sensor_ids]
+    if not sensor_id_list:
+        return {}
+
+    sql = f"""
+        SELECT sensor_id, metric, toUInt32(max(value)) AS metric_value
+        FROM {CH_DB}.{DAILY_METRICS_TABLE} FINAL
+        WHERE sensor_id IN {{sensor_ids:Array(String)}}
+          AND day >= {{start_day:Date}} AND day <= {{end_day:Date}}
+        GROUP BY sensor_id, metric
+    """
+
+    try:
+        df = ch().query_df(
+            sql,
+            parameters={
+                "sensor_ids": sensor_id_list,
+                "start_day": start_day,
+                "end_day": end_day,
+            },
+        )
+    except Exception:
+        return {}
+
+    metrics: Dict[str, Dict[str, int]] = {}
+    for _, row in df.iterrows():
+        sid = str(row["sensor_id"])
+        metric_name = str(row["metric"])
+        value = int(row["metric_value"])
+        metrics.setdefault(sid, {})[metric_name] = value
+    return metrics
+
+
+def fetch_metric_daily_value(metric: str, sensor_id, start_dt, end_dt, sensor_type: Optional[str] = None) -> int:
+    """
+    Convenience wrapper that converts datetimes to days and returns 0 when no precomputed rows exist.
+    """
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+    precomputed = fetch_precomputed_metric(metric, sensor_id, start_day, end_day, sensor_type)
+    return precomputed if precomputed is not None else 0
 
 
 def choose_bucket_seconds(start_date: date, end_date: date) -> int:
@@ -163,11 +215,7 @@ def fetch_con_zero_vol(sensor_id, routes, directions, sensor_type_db, start_dt, 
 
     metric_name = "conZeroOcc" if str(sensor_type_db) == "c30" else "conZeroVol"
     if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
-        start_day = start_dt.date()
-        end_day = end_dt.date()
-        precomputed = fetch_precomputed_metric(metric_name, sensor_id, start_day, end_day, str(sensor_type_db))
-        if precomputed is not None:
-            return precomputed
+        return fetch_metric_daily_value(metric_name, sensor_id, start_dt, end_dt, str(sensor_type_db))
 
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS conZeroVol
@@ -222,47 +270,8 @@ def fetch_neg_vol_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, e
     """
     negVolCnt: for each day in range, count 30s slots with negative values; return the maximum daily count.
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
     metric_name = "negOccCnt" if str(sensor_type_db) == "c30" else "negVolCnt"
-    precomputed = fetch_precomputed_metric(metric_name, sensor_id, start_day, end_day, str(sensor_type_db))
-    if precomputed is not None:
-        return precomputed
-
-    sql = """
-        SELECT ifNull(max(neg_cnt), 0) AS negVolCnt
-        FROM
-        (
-            SELECT r.day AS day, countIf(ifNull(r.value, 0) < 0) AS neg_cnt
-            FROM raw_30s AS r
-            INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
-            WHERE r.sensor_id = {sensor_id:String}
-              AND toString(r.sensor_type) = {sensor_type:String}
-              AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
-              AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-              AND m.route IN {routes:Array(String)}
-              AND m.direction IN {directions:Array(String)}
-            GROUP BY day
-        )
-    """
-
-    df = ch().query_df(
-        sql,
-        parameters={
-            "sensor_id": str(sensor_id),
-            "sensor_type": str(sensor_type_db),
-            "start_day": start_day,
-            "end_day": end_day,
-            "start": start_dt,
-            "end": end_dt,
-            "routes": routes,
-            "directions": directions,
-        },
-    )
-    if df.empty:
-        return 0
-    return int(df["negVolCnt"].iloc[0])
+    return fetch_metric_daily_value(metric_name, sensor_id, start_dt, end_dt, str(sensor_type_db))
 
 
 def fetch_occ_lock_on(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> int:
@@ -270,46 +279,7 @@ def fetch_occ_lock_on(sensor_id, routes, directions, sensor_type_db, start_dt, e
     occLockOn: for each day in range, count 30s slots where 99 < value <= 100; return the maximum daily count.
     Intended for occupancy (c30).
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
-    precomputed = fetch_precomputed_metric("occLockOn", sensor_id, start_day, end_day, str(sensor_type_db))
-    if precomputed is not None:
-        return precomputed
-
-    sql = """
-        SELECT ifNull(max(lock_cnt), 0) AS occLockOn
-        FROM
-        (
-            SELECT r.day AS day, countIf((ifNull(r.value, -1) >= 99) AND (ifNull(r.value, -1) <= 100)) AS lock_cnt
-            FROM raw_30s AS r
-            INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
-            WHERE r.sensor_id = {sensor_id:String}
-              AND toString(r.sensor_type) = {sensor_type:String}
-              AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
-              AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-              AND m.route IN {routes:Array(String)}
-              AND m.direction IN {directions:Array(String)}
-            GROUP BY day
-        )
-    """
-
-    df = ch().query_df(
-        sql,
-        parameters={
-            "sensor_id": str(sensor_id),
-            "sensor_type": str(sensor_type_db),
-            "start_day": start_day,
-            "end_day": end_day,
-            "start": start_dt,
-            "end": end_dt,
-            "routes": routes,
-            "directions": directions,
-        },
-    )
-    if df.empty:
-        return 0
-    return int(df["occLockOn"].iloc[0])
+    return fetch_metric_daily_value("occLockOn", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
 
 def fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt, vol_sensor_type_db: str = "v30", occ_sensor_type_db: str = "c30") -> int:
@@ -317,57 +287,8 @@ def fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt, vol_senso
     zvolOnOcc: for each day in range, count 30s slots where volume is zero (v30) while occupancy is non-zero (c30);
     return the maximum daily count.
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
     metric_sensor_type = f"{vol_sensor_type_db}+{occ_sensor_type_db}"
-    precomputed = fetch_precomputed_metric("zvolOnOcc", sensor_id, start_day, end_day, metric_sensor_type)
-    if precomputed is not None:
-        return precomputed
-
-    sql = """
-        SELECT ifNull(max(z_cnt), 0) AS zvolOnOcc
-        FROM
-        (
-            SELECT day, countIf((vol = 0) AND (occ > 0)) AS z_cnt
-            FROM
-            (
-                SELECT
-                    r.day AS day,
-                    r.ts AS ts,
-                    anyIf(r.value, toString(r.sensor_type) = {vol_type:String}) AS vol,
-                    anyIf(r.value, toString(r.sensor_type) = {occ_type:String}) AS occ
-                FROM raw_30s AS r
-                INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
-                WHERE r.sensor_id = {sensor_id:String}
-                  AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
-                  AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-                  AND (toString(r.sensor_type) = {vol_type:String} OR toString(r.sensor_type) = {occ_type:String})
-                  AND m.route IN {routes:Array(String)}
-                  AND m.direction IN {directions:Array(String)}
-                GROUP BY day, ts
-            )
-            GROUP BY day
-        )
-    """
-
-    df = ch().query_df(
-        sql,
-        parameters={
-            "sensor_id": str(sensor_id),
-            "vol_type": str(vol_sensor_type_db),
-            "occ_type": str(occ_sensor_type_db),
-            "start_day": start_day,
-            "end_day": end_day,
-            "start": start_dt,
-            "end": end_dt,
-            "routes": routes,
-            "directions": directions,
-        },
-    )
-    if df.empty:
-        return 0
-    return int(df["zvolOnOcc"].iloc[0])
+    return fetch_metric_daily_value("zvolOnOcc", sensor_id, start_dt, end_dt, metric_sensor_type)
 
 
 def fetch_vol_on_low_occ(
@@ -384,15 +305,11 @@ def fetch_vol_on_low_occ(
     volOnLowOcc: for each day in range, count 30s slots where volume > 1 (v30) while occupancy <= occ_threshold (c30);
     return the maximum daily count.
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
     metric_sensor_type = f"{vol_sensor_type_db}+{occ_sensor_type_db}"
     if abs(float(occ_threshold) - PRECOMPUTED_OCC_THRESHOLD) < 1e-9:
-        precomputed = fetch_precomputed_metric("volOnLowOcc", sensor_id, start_day, end_day, metric_sensor_type)
-        if precomputed is not None:
-            return precomputed
+        return fetch_metric_daily_value("volOnLowOcc", sensor_id, start_dt, end_dt, metric_sensor_type)
 
+    # Fallback to raw query only if a non-default threshold is requested.
     sql = """
         SELECT ifNull(max(cnt), 0) AS volOnLowOcc
         FROM
@@ -419,6 +336,8 @@ def fetch_vol_on_low_occ(
         )
     """
 
+    start_day = start_dt.date()
+    end_day = end_dt.date()
     df = ch().query_df(
         sql,
         parameters={
@@ -444,46 +363,7 @@ def fetch_over_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, end_
     overCnt: for each day in range, count 30s slots where 25 < value < 128; return the maximum daily count.
     Intended for volume (v30).
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
-    precomputed = fetch_precomputed_metric("overCnt", sensor_id, start_day, end_day, str(sensor_type_db))
-    if precomputed is not None:
-        return precomputed
-
-    sql = """
-        SELECT ifNull(max(over_cnt), 0) AS overCnt
-        FROM
-        (
-            SELECT r.day AS day, countIf((ifNull(r.value, -1) > 25) AND (ifNull(r.value, -1) < 128)) AS over_cnt
-            FROM raw_30s AS r
-            INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
-            WHERE r.sensor_id = {sensor_id:String}
-              AND toString(r.sensor_type) = {sensor_type:String}
-              AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
-              AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-              AND m.route IN {routes:Array(String)}
-              AND m.direction IN {directions:Array(String)}
-            GROUP BY day
-        )
-    """
-
-    df = ch().query_df(
-        sql,
-        parameters={
-            "sensor_id": str(sensor_id),
-            "sensor_type": str(sensor_type_db),
-            "start_day": start_day,
-            "end_day": end_day,
-            "start": start_dt,
-            "end": end_dt,
-            "routes": routes,
-            "directions": directions,
-        },
-    )
-    if df.empty:
-        return 0
-    return int(df["overCnt"].iloc[0])
+    return fetch_metric_daily_value("overCnt", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
 
 def fetch_high_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> int:
@@ -491,46 +371,7 @@ def fetch_high_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end_
     highOcc: for each day in range, count 30s slots where value > 35; return the maximum daily count.
     Intended for occupancy (c30).
     """
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
-    precomputed = fetch_precomputed_metric("highOcc", sensor_id, start_day, end_day, str(sensor_type_db))
-    if precomputed is not None:
-        return precomputed
-
-    sql = """
-        SELECT ifNull(max(high_cnt), 0) AS highOcc
-        FROM
-        (
-            SELECT r.day AS day, countIf(ifNull(r.value, -1) > 35) AS high_cnt
-            FROM raw_30s AS r
-            INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
-            WHERE r.sensor_id = {sensor_id:String}
-              AND toString(r.sensor_type) = {sensor_type:String}
-              AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
-              AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-              AND m.route IN {routes:Array(String)}
-              AND m.direction IN {directions:Array(String)}
-            GROUP BY day
-        )
-    """
-
-    df = ch().query_df(
-        sql,
-        parameters={
-            "sensor_id": str(sensor_id),
-            "sensor_type": str(sensor_type_db),
-            "start_day": start_day,
-            "end_day": end_day,
-            "start": start_dt,
-            "end": end_dt,
-            "routes": routes,
-            "directions": directions,
-        },
-    )
-    if df.empty:
-        return 0
-    return int(df["highOcc"].iloc[0])
+    return fetch_metric_daily_value("highOcc", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
 
 def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt, min_run_slots: int = 20) -> int:
@@ -544,13 +385,8 @@ def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end
     if min_run_slots <= 0:
         raise ValueError("min_run_slots must be >= 1")
 
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
     if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
-        precomputed = fetch_precomputed_metric("constVol", sensor_id, start_day, end_day, str(sensor_type_db))
-        if precomputed is not None:
-            return precomputed
+        return fetch_metric_daily_value("constVol", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constVol
@@ -633,13 +469,8 @@ def fetch_const_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end
     if min_run_slots <= 0:
         raise ValueError("min_run_slots must be >= 1")
 
-    start_day = start_dt.date()
-    end_day = end_dt.date()
-
     if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
-        precomputed = fetch_precomputed_metric("constOcc", sensor_id, start_day, end_day, str(sensor_type_db))
-        if precomputed is not None:
-            return precomputed
+        return fetch_metric_daily_value("constOcc", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constOcc

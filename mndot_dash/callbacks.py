@@ -19,6 +19,7 @@ from .backend import (
     fetch_meta_with_presence,
     fetch_neg_vol_cnt,
     fetch_occ_lock_on,
+    fetch_precomputed_metrics_for_sensors,
     fetch_raw_count,
     fetch_ts_joined,
     fetch_vol_on_low_occ,
@@ -75,9 +76,38 @@ def register_callbacks(app, cache) -> None:
         Input("sensor-label", "value"),
         Input("date-range", "start_date"),
         Input("date-range", "end_date"),
+        Input("threshold-conZeroVol", "value"),
+        Input("threshold-negVolCnt", "value"),
+        Input("threshold-conZeroOcc", "value"),
+        Input("threshold-negOccCnt", "value"),
+        Input("threshold-occLockOn", "value"),
+        Input("threshold-zvolOnOcc", "value"),
+        Input("threshold-overCnt", "value"),
+        Input("threshold-highOcc", "value"),
+        Input("threshold-constVol", "value"),
+        Input("threshold-constOcc", "value"),
+        Input("threshold-volOnLowOcc", "value"),
         State("active-sensor-store", "data"),
     )
-    def update_meta_and_map(clear_cache_n, corridors, sensor_label, start_date_s, end_date_s, active_sensor):
+    def update_meta_and_map(
+        clear_cache_n,
+        corridors,
+        sensor_label,
+        start_date_s,
+        end_date_s,
+        threshold_con_zero_vol,
+        threshold_neg_vol_cnt,
+        threshold_con_zero_occ,
+        threshold_neg_occ_cnt,
+        threshold_occ_lock_on,
+        threshold_zvol_on_occ,
+        threshold_over_cnt,
+        threshold_high_occ,
+        threshold_const_vol,
+        threshold_const_occ,
+        threshold_vol_on_low_occ,
+        active_sensor,
+    ):
         ctx = dash.callback_context
         if clear_cache_n and any(t.get("prop_id") == "clear-cache.n_clicks" for t in (ctx.triggered or [])):
             cache.clear()
@@ -127,6 +157,67 @@ def register_callbacks(app, cache) -> None:
             selected_set = set(corridors_norm)
             corridor_col = df_show["route"].astype(str).str.strip() + " " + df_show["direction"].astype(str).str.strip()
             df_show = df_show.loc[corridor_col.isin(selected_set)].reset_index(drop=True)
+
+        if df_show.empty:
+            debug_caption = "Debug: sensors shown=0, with_data=0, anomalous=0"
+            fig = empty_map_figure()
+            sensor_options = []
+            manual_value = None
+            records = []
+            return records, fig, sensor_options, manual_value, debug_caption, False, ""
+
+        def parse_threshold(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float("inf")
+
+        thresholds = {
+            "conZeroVol": parse_threshold(threshold_con_zero_vol),
+            "negVolCnt": parse_threshold(threshold_neg_vol_cnt),
+            "overCnt": parse_threshold(threshold_over_cnt),
+            "constVol": parse_threshold(threshold_const_vol),
+            "conZeroOcc": parse_threshold(threshold_con_zero_occ),
+            "constOcc": parse_threshold(threshold_const_occ),
+            "negOccCnt": parse_threshold(threshold_neg_occ_cnt),
+            "occLockOn": parse_threshold(threshold_occ_lock_on),
+            "highOcc": parse_threshold(threshold_high_occ),
+            "zvolOnOcc": parse_threshold(threshold_zvol_on_occ),
+            "volOnLowOcc": parse_threshold(threshold_vol_on_low_occ),
+        }
+
+        df_show["sensor_id"] = df_show["sensor_id"].astype(str)
+        has_data_map = {sid: bool(hd) for sid, hd in zip(df_show["sensor_id"], df_show["has_data"])}
+        sensor_ids = df_show["sensor_id"].tolist()
+        metrics_map = fetch_precomputed_metrics_for_sensors(sensor_ids, start_day, end_day)
+
+        def sensor_anomalous(sid: str) -> bool:
+            if not has_data_map.get(sid, False):
+                return False
+            mv = metrics_map.get(sid, {})
+            metric_values = {
+                "conZeroVol": mv.get("conZeroVol", 0),
+                "negVolCnt": mv.get("negVolCnt", 0),
+                "overCnt": mv.get("overCnt", 0),
+                "constVol": mv.get("constVol", 0),
+                "conZeroOcc": mv.get("conZeroOcc", 0),
+                "constOcc": mv.get("constOcc", 0),
+                "negOccCnt": mv.get("negOccCnt", 0),
+                "occLockOn": mv.get("occLockOn", 0),
+                "highOcc": mv.get("highOcc", 0),
+                "zvolOnOcc": mv.get("zvolOnOcc", 0),
+                "volOnLowOcc": mv.get("volOnLowOcc", 0),
+            }
+            exceed_count = sum(1 for key, value in metric_values.items() if value > thresholds[key])
+            total_metrics = len(metric_values)
+            required = (total_metrics + 1) // 2
+            return exceed_count >= required
+
+        df_show["anomalous"] = df_show["sensor_id"].apply(sensor_anomalous)
+        df_show["status_label"] = df_show.apply(
+            lambda r: "No data" if not r.get("has_data", False) else ("Anomalous" if r["anomalous"] else "Healthy"),
+            axis=1,
+        )
 
         debug_caption = make_debug_caption(df_show)
         sensor_options = make_manual_sensor_options(df_show)

@@ -174,7 +174,7 @@ def build_layout() -> dbc.Container:
                         children=[
                             html.H3("MnDOT Detector Monitor"),
                             html.Div(
-                                "Blue markers have data under current filters; gray markers do not. Click a marker to open the time-series dialog.",
+                                "Red markers are anomalous, green are healthy, gray have no data under current filters. Click a marker to open the time-series dialog.",
                                 style={"color": "#6B7280"},
                             ),
                             html.Div(style={"height": "8px"}),
@@ -250,7 +250,8 @@ def build_layout() -> dbc.Container:
 def make_debug_caption(df_show: pd.DataFrame) -> str:
     shown = len(df_show)
     with_data = int(df_show["has_data"].sum()) if (shown and "has_data" in df_show.columns) else 0
-    return f"Debug: sensors shown={shown:,}, with_data={with_data:,}"
+    anomalous = int(df_show["anomalous"].sum()) if (shown and "anomalous" in df_show.columns) else 0
+    return f"Debug: sensors shown={shown:,}, with_data={with_data:,}, anomalous={anomalous:,}"
 
 
 def make_manual_sensor_options(df_show: pd.DataFrame) -> List[Dict[str, str]]:
@@ -276,7 +277,10 @@ def build_map_figure(df_show: pd.DataFrame) -> go.Figure:
         center_lat, center_lon = 44.97, -93.20
 
     df_plot = df_show.copy()
-    df_plot["status"] = np.where(df_plot["has_data"], "has data", "no data")
+    if "status_label" in df_plot.columns:
+        df_plot["status"] = df_plot["status_label"]
+    else:
+        df_plot["status"] = np.where(df_plot["has_data"], "Healthy", "No data")
     lane_str = df_plot["lane"].apply(lambda x: "None" if pd.isna(x) else str(int(x)))
     df_plot["tooltip"] = (
         df_plot["route"].astype(str)
@@ -307,7 +311,11 @@ def build_map_figure(df_show: pd.DataFrame) -> go.Figure:
         center={"lat": center_lat, "lon": center_lon},
         map_style="open-street-map",
         height=700,
-        color_discrete_map={"has data": BLUE, "no data": GRAY},
+        color_discrete_map={
+            "Anomalous": "#DC2626",
+            "Healthy": "#16A34A",
+            "No data": GRAY,
+        },
     )
     fig.update_traces(marker={"size": 10, "opacity": 0.9})
     fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), legend_title_text="")
