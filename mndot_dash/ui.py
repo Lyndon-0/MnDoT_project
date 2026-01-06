@@ -31,8 +31,6 @@ def empty_map_figure(center=(44.97, -93.20), zoom=11) -> go.Figure:
 
 
 def build_layout() -> dbc.Container:
-    today = date.today()
-
     return dbc.Container(
         fluid=True,
         children=[
@@ -67,8 +65,8 @@ def build_layout() -> dbc.Container:
                             dbc.Label("Date Range"),
                             dcc.DatePickerRange(
                                 id="date-range",
-                                start_date=today,
-                                end_date=today,
+                                start_date=date(2020, 3, 5),
+                                end_date=date(2020, 3, 31),
                                 display_format="YYYY-MM-DD",
                                 minimum_nights=0,
                             ),
@@ -81,6 +79,94 @@ def build_layout() -> dbc.Container:
                             ),
                             html.Div(style={"height": "10px"}),
                             dbc.Alert(id="validation-alert", color="warning", is_open=False),
+                            html.Div(style={"height": "10px"}),
+                            dbc.Accordion(
+                                [
+                                    dbc.AccordionItem(
+                                        title="Threshoulds",
+                                        children=[
+                                            dbc.Label("conZeroVol"),
+                                            dbc.Input(
+                                                id="threshold-conZeroVol",
+                                                type="text",
+                                                value="2870",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("negVolCnt"),
+                                            dbc.Input(
+                                                id="threshold-negVolCnt",
+                                                type="text",
+                                                value="1440",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("conZeroOcc"),
+                                            dbc.Input(
+                                                id="threshold-conZeroOcc",
+                                                type="text",
+                                                value="-1",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("negOccCnt"),
+                                            dbc.Input(
+                                                id="threshold-negOccCnt",
+                                                type="text",
+                                                value="-1",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("occLockOn"),
+                                            dbc.Input(
+                                                id="threshold-occLockOn",
+                                                type="text",
+                                                value="2304",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("zvolOnOcc"),
+                                            dbc.Input(
+                                                id="threshold-zvolOnOcc",
+                                                type="text",
+                                                value="2304",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("overCnt"),
+                                            dbc.Input(
+                                                id="threshold-overCnt",
+                                                type="text",
+                                                value="2304",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("highOcc"),
+                                            dbc.Input(
+                                                id="threshold-highOcc",
+                                                type="text",
+                                                value="2592",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("constVol"),
+                                            dbc.Input(
+                                                id="threshold-constVol",
+                                                type="text",
+                                                value="-1",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("constOcc"),
+                                            dbc.Input(
+                                                id="threshold-constOcc",
+                                                type="text",
+                                                value="-1",
+                                            ),
+                                            html.Div(style={"height": "6px"}),
+                                            dbc.Label("volOnLowOcc"),
+                                            dbc.Input(
+                                                id="threshold-volOnLowOcc",
+                                                type="text",
+                                                value="-1",
+                                            ),
+                                        ],
+                                    )
+                                ],
+                                start_collapsed=True,
+                                flush=True,
+                            ),
                         ],
                     ),
                     dbc.Col(
