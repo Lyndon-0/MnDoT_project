@@ -1,4 +1,5 @@
 CH_HOST, CH_PORT, CH_DB = "127.0.0.1", 8123, "sensors"
+DAILY_METRICS_TABLE = "daily_metrics"
 
 ROUTE_OPTIONS = ["I-94", "I-494", "I-35E", "I-35W", "I-694"]
 DIRECTION_OPTIONS = ["EB", "NB", "SB", "WB"]

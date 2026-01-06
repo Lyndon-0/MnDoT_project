@@ -1,17 +1,60 @@
 import json
 from datetime import date
 from functools import lru_cache
+from typing import Optional
 
 import pandas as pd
 
 import clickhouse_connect
 
-from .config import CH_HOST, CH_PORT, CH_DB
+from .config import CH_HOST, CH_PORT, CH_DB, DAILY_METRICS_TABLE
+
+
+PRECOMPUTED_MIN_RUN_SLOTS = 20
+PRECOMPUTED_OCC_THRESHOLD = 0.2
 
 
 @lru_cache(maxsize=1)
 def ch():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB)
+
+
+def fetch_precomputed_metric(metric: str, sensor_id, start_day: date, end_day: date, sensor_type: Optional[str] = None) -> Optional[int]:
+    """
+    Look up a metric in the daily_metrics table for the given sensor/day range.
+    Returns None if the table is missing, the query fails, or no rows are present.
+    """
+    where_sensor_type = " AND sensor_type = {sensor_type:String}" if sensor_type else ""
+    sql = f"""
+        SELECT toUInt32(ifNull(max(value), 0)) AS metric_value
+        FROM {CH_DB}.{DAILY_METRICS_TABLE} FINAL
+        WHERE sensor_id = {{sensor_id:String}}
+          AND metric = {{metric:String}}
+          AND day >= {{start_day:Date}} AND day <= {{end_day:Date}}
+          {where_sensor_type}
+    """
+
+    params = {
+        "sensor_id": str(sensor_id),
+        "metric": metric,
+        "start_day": start_day,
+        "end_day": end_day,
+    }
+    if sensor_type:
+        params["sensor_type"] = sensor_type
+
+    try:
+        df = ch().query_df(sql, parameters=params)
+    except Exception:
+        return None
+
+    if df.empty:
+        return None
+
+    value = df["metric_value"].iloc[0]
+    if pd.isna(value):
+        return None
+    return int(value)
 
 
 def choose_bucket_seconds(start_date: date, end_date: date) -> int:
@@ -118,6 +161,14 @@ def fetch_con_zero_vol(sensor_id, routes, directions, sensor_type_db, start_dt, 
     if min_run_slots <= 0:
         raise ValueError("min_run_slots must be >= 1")
 
+    metric_name = "conZeroOcc" if str(sensor_type_db) == "c30" else "conZeroVol"
+    if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
+        start_day = start_dt.date()
+        end_day = end_dt.date()
+        precomputed = fetch_precomputed_metric(metric_name, sensor_id, start_day, end_day, str(sensor_type_db))
+        if precomputed is not None:
+            return precomputed
+
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS conZeroVol
         FROM
@@ -174,6 +225,11 @@ def fetch_neg_vol_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, e
     start_day = start_dt.date()
     end_day = end_dt.date()
 
+    metric_name = "negOccCnt" if str(sensor_type_db) == "c30" else "negVolCnt"
+    precomputed = fetch_precomputed_metric(metric_name, sensor_id, start_day, end_day, str(sensor_type_db))
+    if precomputed is not None:
+        return precomputed
+
     sql = """
         SELECT ifNull(max(neg_cnt), 0) AS negVolCnt
         FROM
@@ -217,6 +273,10 @@ def fetch_occ_lock_on(sensor_id, routes, directions, sensor_type_db, start_dt, e
     start_day = start_dt.date()
     end_day = end_dt.date()
 
+    precomputed = fetch_precomputed_metric("occLockOn", sensor_id, start_day, end_day, str(sensor_type_db))
+    if precomputed is not None:
+        return precomputed
+
     sql = """
         SELECT ifNull(max(lock_cnt), 0) AS occLockOn
         FROM
@@ -259,6 +319,11 @@ def fetch_zvol_on_occ(sensor_id, routes, directions, start_dt, end_dt, vol_senso
     """
     start_day = start_dt.date()
     end_day = end_dt.date()
+
+    metric_sensor_type = f"{vol_sensor_type_db}+{occ_sensor_type_db}"
+    precomputed = fetch_precomputed_metric("zvolOnOcc", sensor_id, start_day, end_day, metric_sensor_type)
+    if precomputed is not None:
+        return precomputed
 
     sql = """
         SELECT ifNull(max(z_cnt), 0) AS zvolOnOcc
@@ -322,6 +387,12 @@ def fetch_vol_on_low_occ(
     start_day = start_dt.date()
     end_day = end_dt.date()
 
+    metric_sensor_type = f"{vol_sensor_type_db}+{occ_sensor_type_db}"
+    if abs(float(occ_threshold) - PRECOMPUTED_OCC_THRESHOLD) < 1e-9:
+        precomputed = fetch_precomputed_metric("volOnLowOcc", sensor_id, start_day, end_day, metric_sensor_type)
+        if precomputed is not None:
+            return precomputed
+
     sql = """
         SELECT ifNull(max(cnt), 0) AS volOnLowOcc
         FROM
@@ -376,6 +447,10 @@ def fetch_over_cnt(sensor_id, routes, directions, sensor_type_db, start_dt, end_
     start_day = start_dt.date()
     end_day = end_dt.date()
 
+    precomputed = fetch_precomputed_metric("overCnt", sensor_id, start_day, end_day, str(sensor_type_db))
+    if precomputed is not None:
+        return precomputed
+
     sql = """
         SELECT ifNull(max(over_cnt), 0) AS overCnt
         FROM
@@ -418,6 +493,10 @@ def fetch_high_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end_
     """
     start_day = start_dt.date()
     end_day = end_dt.date()
+
+    precomputed = fetch_precomputed_metric("highOcc", sensor_id, start_day, end_day, str(sensor_type_db))
+    if precomputed is not None:
+        return precomputed
 
     sql = """
         SELECT ifNull(max(high_cnt), 0) AS highOcc
@@ -467,6 +546,11 @@ def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end
 
     start_day = start_dt.date()
     end_day = end_dt.date()
+
+    if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
+        precomputed = fetch_precomputed_metric("constVol", sensor_id, start_day, end_day, str(sensor_type_db))
+        if precomputed is not None:
+            return precomputed
 
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constVol
@@ -551,6 +635,11 @@ def fetch_const_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end
 
     start_day = start_dt.date()
     end_day = end_dt.date()
+
+    if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
+        precomputed = fetch_precomputed_metric("constOcc", sensor_id, start_day, end_day, str(sensor_type_db))
+        if precomputed is not None:
+            return precomputed
 
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constOcc
