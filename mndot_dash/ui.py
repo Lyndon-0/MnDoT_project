@@ -225,6 +225,10 @@ def build_layout() -> dbc.Container:
                         children=[
                             html.Div(id="ts-modal-meta", style={"marginBottom": "8px"}),
                             html.Div(
+                                id="ts-modal-status",
+                                style={"marginBottom": "8px"},
+                            ),
+                            html.Div(
                                 id="ts-modal-debug",
                                 style={"color": "#6B7280", "marginBottom": "8px"},
                             ),

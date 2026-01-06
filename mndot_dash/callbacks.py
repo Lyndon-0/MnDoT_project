@@ -216,6 +216,7 @@ def register_callbacks(app, cache) -> None:
     @app.callback(
         Output("ts-modal-title", "children"),
         Output("ts-modal-meta", "children"),
+        Output("ts-modal-status", "children"),
         Output("ts-modal-debug", "children"),
         Output("ts-modal-alert", "is_open"),
         Output("ts-modal-alert", "children"),
@@ -227,19 +228,48 @@ def register_callbacks(app, cache) -> None:
         State("sensor-label", "value"),
         State("date-range", "start_date"),
         State("date-range", "end_date"),
+        State("threshold-conZeroVol", "value"),
+        State("threshold-negVolCnt", "value"),
+        State("threshold-overCnt", "value"),
+        State("threshold-constVol", "value"),
+        State("threshold-conZeroOcc", "value"),
+        State("threshold-constOcc", "value"),
+        State("threshold-negOccCnt", "value"),
+        State("threshold-occLockOn", "value"),
+        State("threshold-highOcc", "value"),
+        State("threshold-zvolOnOcc", "value"),
+        State("threshold-volOnLowOcc", "value"),
     )
-    def update_ts_modal(is_open, sensor_id, corridors, sensor_label, start_date_s, end_date_s):
+    def update_ts_modal(
+        is_open,
+        sensor_id,
+        corridors,
+        sensor_label,
+        start_date_s,
+        end_date_s,
+        threshold_con_zero_vol,
+        threshold_neg_vol_cnt,
+        threshold_over_cnt,
+        threshold_const_vol,
+        threshold_con_zero_occ,
+        threshold_const_occ,
+        threshold_neg_occ_cnt,
+        threshold_occ_lock_on,
+        threshold_high_occ,
+        threshold_zvol_on_occ,
+        threshold_vol_on_low_occ,
+    ):
         if not is_open or not sensor_id:
-            return "", "", "", False, "", go.Figure(), ""
+            return "", "", "", "", False, "", go.Figure(), ""
 
         corridors_norm, routes, directions = split_corridors(corridors)
         if not corridors_norm:
-            return "Time series", "", "", True, "A corridor must be selected.", go.Figure(), ""
+            return "Time series", "", "", "", True, "A corridor must be selected.", go.Figure(), ""
 
         start_date = date.fromisoformat(start_date_s)
         end_date = date.fromisoformat(end_date_s)
         if end_date < start_date:
-            return "Time series", "", "", True, "End date must be on or after the start date.", go.Figure(), ""
+            return "Time series", "", "", "", True, "End date must be on or after the start date.", go.Figure(), ""
 
         sensor_type_db = UI2DB_SENSOR[sensor_label]
         metrics_sensor_type_db = "v30"
@@ -413,11 +443,69 @@ def register_callbacks(app, cache) -> None:
                 f"Detector {sensor_id}",
                 meta_line,
                 "",
+                "",
                 True,
                 f"ClickHouse error while loading time series: {e}",
                 go.Figure(),
                 "",
             )
+
+        def parse_threshold(value):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return float("inf")
+
+        thresholds = {
+            "conZeroVol": parse_threshold(threshold_con_zero_vol),
+            "negVolCnt": parse_threshold(threshold_neg_vol_cnt),
+            "overCnt": parse_threshold(threshold_over_cnt),
+            "constVol": parse_threshold(threshold_const_vol),
+            "conZeroOcc": parse_threshold(threshold_con_zero_occ),
+            "constOcc": parse_threshold(threshold_const_occ),
+            "negOccCnt": parse_threshold(threshold_neg_occ_cnt),
+            "occLockOn": parse_threshold(threshold_occ_lock_on),
+            "highOcc": parse_threshold(threshold_high_occ),
+            "zvolOnOcc": parse_threshold(threshold_zvol_on_occ),
+            "volOnLowOcc": parse_threshold(threshold_vol_on_low_occ),
+        }
+        metric_values = {
+            "conZeroVol": con_zero_vol,
+            "negVolCnt": neg_vol_cnt,
+            "overCnt": over_cnt,
+            "constVol": const_vol,
+            "conZeroOcc": con_zero_occ,
+            "constOcc": const_occ,
+            "negOccCnt": neg_occ_cnt,
+            "occLockOn": occ_lock_on,
+            "highOcc": high_occ,
+            "zvolOnOcc": zvol_on_occ,
+            "volOnLowOcc": vol_on_low_occ,
+        }
+        exceed_count = sum(1 for key, value in metric_values.items() if value > thresholds[key])
+        total_metrics = len(metric_values)
+        required = (total_metrics + 1) // 2
+        is_anomalous = exceed_count >= required
+        status_color = "#DC2626" if is_anomalous else "#16A34A"
+        status_text = "Anomalous" if is_anomalous else "Healthy"
+        status_component = html.Div(
+            [
+                html.Span(
+                    style={
+                        "display": "inline-block",
+                        "width": "10px",
+                        "height": "10px",
+                        "borderRadius": "50%",
+                        "backgroundColor": status_color,
+                    }
+                ),
+                html.Span(
+                    f"Status: {status_text}",
+                    style={"color": status_color, "fontWeight": "600"},
+                ),
+            ],
+            style={"display": "flex", "alignItems": "center", "gap": "8px"},
+        )
 
         debug = f"Debug: raw rows matching filters = {raw_rows:,} | chart points returned (aggregated) = {len(df_ts):,}"
 
@@ -425,6 +513,7 @@ def register_callbacks(app, cache) -> None:
             return (
                 f"Detector {sensor_id}",
                 meta_line,
+                status_component,
                 debug,
                 True,
                 "No time-series rows returned for this sensor under the current filters/range.",
@@ -474,4 +563,4 @@ def register_callbacks(app, cache) -> None:
             html.Div(vol_on_low_occ_line),
         ]
 
-        return f"Detector {sensor_id}", meta_line, debug, False, "", fig, metrics
+        return f"Detector {sensor_id}", meta_line, status_component, debug, False, "", fig, metrics
