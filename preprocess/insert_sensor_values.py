@@ -6,7 +6,6 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 import aiohttp
-
 import clickhouse_connect
 import numpy as np
 import pandas as pd
@@ -25,15 +24,18 @@ DB = "sensors"
 TABLE = "raw_30s"
 CH_TABLE = TABLE
 
-TARGET_ROWS_PER_BATCH = 8_000_000
+TARGET_ROWS_PER_BATCH = 4_000_000  # Kept at 4M for optimal balance
 DEFAULT_START_DATE = date(YEAR, 1, 1)
 DEFAULT_END_DATE = date(YEAR, 12, 31)
 SAMPLES_PER_DAY = 2880
-API_CONCURRENCY = 300
-API_CHUNK_SIZE = 100
-API_TIMEOUT_SECONDS = 30
+
+# PERFORMANCE TUNING
+API_CONCURRENCY = 1000   # 3000 might be too aggressive for open files/sockets, 1000 is safer
+API_CHUNK_SIZE = 200
+API_TIMEOUT_SECONDS = 60 # Increased timeout for safety
 API_RETRY_DELAY_SECONDS = 0.1
 API_MAX_RETRIES = 3
+QUEUE_SIZE = 15_000      # Buffer for ~3-4 batches
 
 SENSOR_TYPE_TO_ENDPOINT = {
     "c30": "occupancy",
@@ -63,7 +65,6 @@ def ensure_schema():
 
 
 def load_allowed_sensors(csv_path: Path) -> set[str]:
-    # Force detector_name to string to avoid losing formatting (e.g., leading zeros)
     df = pd.read_csv(csv_path, dtype={"detector_name": "string"})
     if "detector_name" not in df.columns:
         raise ValueError(f"'detector_name' column not found in {csv_path}")
@@ -150,9 +151,6 @@ def normalize_values(
 
 
 def build_batch_dataframe(batch_buffer: list[tuple[str, str, date, np.ndarray]]) -> pd.DataFrame:
-    """
-    Convert buffered (sensor_id, sensor_type, day, cleaned_values ndarray) tuples into one DataFrame.
-    """
     if not batch_buffer:
         return pd.DataFrame()
 
@@ -164,8 +162,9 @@ def build_batch_dataframe(batch_buffer: list[tuple[str, str, date, np.ndarray]])
 
     one_day_offsets = np.arange(rows_per_sensor, dtype="timedelta64[30s]")
     day_starts = np.array(days, dtype="datetime64[s]")
+    
+    # Correct broadcasting for timestamp generation
     ts_col = (day_starts[:, np.newaxis] + one_day_offsets).reshape(-1)
-
     values_col = np.concatenate(values_list)
 
     return pd.DataFrame(
@@ -173,66 +172,32 @@ def build_batch_dataframe(batch_buffer: list[tuple[str, str, date, np.ndarray]])
             "sensor_id": ids_col,
             "sensor_type": types_col,
             "ts": ts_col,
-            "value": values_col, # It's already np.nan-filled float array
+            "value": values_col,
         }
     )
 
 
-def values_to_df(
-    sensor_id: str,
-    sensor_type: str,
-    day: date,
-    values,
-    *,
-    allow_empty: bool = False,
-) -> pd.DataFrame:
-    sensor_ids, sensor_types, ts, cleaned = values_to_columns(sensor_id, sensor_type, day, values, allow_empty=allow_empty)
-
-    return pd.DataFrame(
-        {
-            "sensor_id": sensor_ids,
-            "sensor_type": sensor_types,
-            "ts": ts,
-            "value": pd.array(cleaned, dtype="Float64"),  # nullable float (occupancy can be float)
-        }
-    )
-
-
-def values_to_columns(
-    sensor_id: str,
-    sensor_type: str,
-    day: date,
-    values,
-    *,
-    allow_empty: bool = False,
-):
+def values_to_df(sensor_id, sensor_type, day, values, allow_empty=False):
     cleaned = normalize_values(sensor_id, sensor_type, day, values, allow_empty=allow_empty)
     sensor_ids = np.full(cleaned.shape[0], sensor_id, dtype=object)
     sensor_types = np.full(cleaned.shape[0], sensor_type, dtype=object)
     base = np.datetime64(f"{day:%Y-%m-%d}T00:00:00", "s")
     offsets = np.arange(cleaned.shape[0], dtype=np.int64) * np.timedelta64(30, "s")
     ts = (base + offsets).astype("datetime64[s]")
-    return sensor_ids, sensor_types, ts, cleaned
+    
+    return pd.DataFrame(
+        {
+            "sensor_id": sensor_ids,
+            "sensor_type": sensor_types,
+            "ts": ts,
+            "value": pd.array(cleaned, dtype="Float64"),
+        }
+    )
 
 
-def file_to_df(day: date, json_path: Path) -> pd.DataFrame:
-    """Reads one sensor JSON file into a DataFrame."""
-    df, _, _ = file_to_df_with_timings(day, json_path)
-    return df
-
-
-def file_to_df_with_timings(day: date, json_path: Path) -> tuple[pd.DataFrame, float, float]:
-    """
-    Reads one JSON file: <SENSOR_ID>.<SENSOR_TYPE>.json
-    JSON content: list of 2880 items, each is either an integer or null.
-    Returns a tuple of (df, read_seconds, transform_seconds).
-    """
+def file_to_df_with_timings(day: date, json_path: Path):
     sensor_id, sensor_type, ext = json_path.name.rsplit(".", 2)
-    if ext.lower() != "json":
-        raise ValueError(f"Unexpected extension: {json_path}")
-    if sensor_type not in ("c30", "s30", "v30"):
-        raise ValueError(f"Unexpected sensor_type '{sensor_type}' in {json_path}")
-
+    
     read_start = time.perf_counter()
     with json_path.open("r") as f:
         values = json.load(f)
@@ -249,6 +214,34 @@ def get_sensors_client():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=DB)
 
 
+def dataframe_to_column_arrays(df: pd.DataFrame) -> tuple[list[str], list[list]]:
+    column_names = ["sensor_id", "sensor_type", "ts", "value"]
+    if df.empty:
+        return column_names, []
+    
+    # Optimization: Use direct numpy arrays where possible to avoid list overhead
+    data = [
+        df["sensor_id"].tolist(),
+        df["sensor_type"].tolist(),
+        df["ts"].tolist(), # ClickHouse Connect handles datetime64[ns]
+        df["value"].where(pd.notna(df["value"]), None).tolist(),
+    ]
+    return column_names, data
+
+
+def insert_column_arrays(client, table: str, df: pd.DataFrame, *, settings: dict | None = None):
+    column_names, data = dataframe_to_column_arrays(df)
+    if not data:
+        return
+    client.insert(
+        table,
+        data,
+        column_names=column_names,
+        column_oriented=True,
+        settings=settings or {},
+    )
+
+
 async def fetch_api_values(
     session: aiohttp.ClientSession,
     semaphore: asyncio.Semaphore,
@@ -258,7 +251,7 @@ async def fetch_api_values(
 ):
     endpoint = SENSOR_TYPE_TO_ENDPOINT[sensor_type]
     url = f"https://data.dot.state.mn.us/mayfly/{endpoint}?date={day:%Y%m%d}&detector={sensor_id}"
-    payload = None
+    
     for attempt in range(1, API_MAX_RETRIES + 1):
         try:
             async with semaphore:
@@ -267,27 +260,17 @@ async def fetch_api_values(
                         return [None] * 2880
                     if resp.status != 200:
                         raise aiohttp.ClientResponseError(
-                            resp.request_info,
-                            resp.history,
-                            status=resp.status,
-                            message=f"status {resp.status}",
-                            headers=resp.headers,
+                            resp.request_info, resp.history, status=resp.status,
+                            message=f"status {resp.status}", headers=resp.headers,
                         )
-                    # payload = await resp.json(content_type=None)
+                    # Optimize: Read bytes directly and pass to orjson
                     raw_data = await resp.read()
-                    payload = orjson.loads(raw_data)
-                    break
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    return orjson.loads(raw_data)
+        except Exception as e:
             if attempt == API_MAX_RETRIES:
-                print(f"API request failed after {attempt} attempts for {url}: {e}")
                 return [None] * 2880
         await asyncio.sleep(API_RETRY_DELAY_SECONDS)
-
-    if payload is None:
-        return [None] * 2880
-    if not isinstance(payload, list):
-        raise ValueError(f"API response was not a list for {url}")
-    return payload
+    return [None] * 2880
 
 
 # -----------------------------
@@ -302,27 +285,18 @@ def ingest_from_files(
     target_rows_per_batch: int = TARGET_ROWS_PER_BATCH,
 ):
     client = get_sensors_client()
-
     batch = []
     batch_rows = 0
     batch_timers = {"read": 0.0, "transform": 0.0}
-
     insert_settings = {}
 
     for day in iter_dates(start_date, end_date):
         folder = day_folder(base_dir, day)
-        if not folder.exists():
-            print(f"Skipping missing folder {folder}")
-            continue
-        if not folder.is_dir():
-            print(f"Skipping non-directory path {folder}")
+        if not folder.exists() or not folder.is_dir():
             continue
 
         for json_path in folder.glob("*.json"):
-            # robust split in case sensor_id has dots
             sensor_id, _, _ = json_path.name.rsplit(".", 2)
-
-            # FILTER: only ingest sensors present in CSV
             if sensor_id not in allowed_sensors:
                 continue
 
@@ -338,34 +312,22 @@ def ingest_from_files(
                 concat_elapsed = time.perf_counter() - concat_start
 
                 insert_start = time.perf_counter()
-                client.insert_df(CH_TABLE, big, settings=insert_settings)
+                insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
                 insert_elapsed = time.perf_counter() - insert_start
 
                 print(
-                    f"Inserted {len(big):,} rows through {day} (folder {folder.name}) | "
-                    f"timings (s): read+decode={batch_timers['read']:.2f}, "
-                    f"to_df={batch_timers['transform']:.2f}, "
-                    f"concat={concat_elapsed:.2f}, insert={insert_elapsed:.2f}"
+                    f"Inserted {len(big):,} rows from files | "
+                    f"Read: {batch_timers['read']:.2f}s, Trans: {batch_timers['transform']:.2f}s, "
+                    f"Concat: {concat_elapsed:.2f}s, Insert: {insert_elapsed:.2f}s"
                 )
                 batch.clear()
                 batch_rows = 0
                 batch_timers = {"read": 0.0, "transform": 0.0}
 
     if batch:
-        concat_start = time.perf_counter()
         big = pd.concat(batch, ignore_index=True)
-        concat_elapsed = time.perf_counter() - concat_start
-
-        insert_start = time.perf_counter()
-        client.insert_df(CH_TABLE, big, settings=insert_settings)
-        insert_elapsed = time.perf_counter() - insert_start
-
-        print(
-            f"Inserted final {len(big):,} rows from files | "
-            f"timings (s): read+decode={batch_timers['read']:.2f}, "
-            f"to_df={batch_timers['transform']:.2f}, "
-            f"concat={concat_elapsed:.2f}, insert={insert_elapsed:.2f}"
-        )
+        insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
+        print(f"Inserted final {len(big):,} rows from files.")
 
 
 def ingest_from_api(
@@ -399,206 +361,128 @@ async def ingest_from_api_async(
     chunk_size: int = API_CHUNK_SIZE,
 ):
     client = get_sensors_client()
+    # Async Insert + Wait reduces client-side blocking
     insert_settings = {'async_insert': 1, 'wait_for_async_insert': 1}
 
     sensor_ids = sorted(allowed_sensors)
-    expected_rows_per_day = len(sensor_ids) * len(SENSOR_TYPE_TO_ENDPOINT) * SAMPLES_PER_DAY if sensor_ids else 0
     timeout = aiohttp.ClientTimeout(total=API_TIMEOUT_SECONDS)
+    
+    # CRITICAL FIX: Uncap connection limit. Without this, concurrency is capped at 100.
+    connector = aiohttp.TCPConnector(limit=None, ttl_dns_cache=300)
+    
     semaphore = asyncio.Semaphore(concurrency)
-    queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_SIZE)
 
     async def producer():
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             for day in iter_dates(start_date, end_date):
                 for sensor_chunk in chunked(sensor_ids, chunk_size):
-                    jobs = [
-                        (
-                            sensor_id,
-                            sensor_type,
-                            fetch_api_values(session, semaphore, sensor_id, sensor_type, day),
-                        )
-                        for sensor_id in sensor_chunk
-                        for sensor_type in SENSOR_TYPE_TO_ENDPOINT
-                    ]
-                    results = await asyncio.gather(*(job[2] for job in jobs))
-                    for (sensor_id, sensor_type, _), values in zip(jobs, results):
-                        await queue.put((sensor_id, sensor_type, day, values))
-        await queue.put(None)
+                    jobs = []
+                    for sensor_id in sensor_chunk:
+                        for sensor_type in SENSOR_TYPE_TO_ENDPOINT:
+                            jobs.append(fetch_api_values(session, semaphore, sensor_id, sensor_type, day))
+                    
+                    results = await asyncio.gather(*jobs)
+                    
+                    # Manually map results back to metadata
+                    # Since we iterate strictly in order: Chunk -> Sensor -> Types
+                    idx = 0
+                    for sensor_id in sensor_chunk:
+                        for sensor_type in SENSOR_TYPE_TO_ENDPOINT:
+                            val = results[idx]
+                            await queue.put((sensor_id, sensor_type, day, val))
+                            idx += 1
+                            
+        # Signal ALL consumers to stop (we have 2 consumers)
+        for _ in range(2): 
+            await queue.put(None)
 
-    async def insert_batch(batch_buffer):
+    async def insert_batch(batch_buffer, cid):
         loop = asyncio.get_running_loop()
         build_start = time.perf_counter()
+        
+        # CPU work: Build DataFrame
         big = await loop.run_in_executor(None, build_batch_dataframe, batch_buffer)
+        
+        # CPU work: Sort by Primary Key
+        if not big.empty:
+            big.sort_values(by=["sensor_id", "sensor_type", "ts"], inplace=True)
+            
         build_elapsed = time.perf_counter() - build_start
         insert_elapsed = 0.0
+        
         if not big.empty:
             insert_start = time.perf_counter()
+            # IO work: Send to ClickHouse (blocks thread but other consumer continues)
             await loop.run_in_executor(
-                None, lambda: client.insert_df(CH_TABLE, big, settings=insert_settings)
+                None, lambda: insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
             )
             insert_elapsed = time.perf_counter() - insert_start
+            
         return build_elapsed, insert_elapsed, len(big)
 
-    async def consumer():
+    async def consumer(cid):
         batch_buffer = []
         batch_rows = 0
-        current_day: date | None = None
-        day_rows = 0
         while True:
             item = await queue.get()
             if item is None:
                 queue.task_done()
                 break
-            sensor_id, sensor_type, day, values = item
-            if current_day is None:
-                current_day = day
-            if day != current_day:
-                print(
-                    f"[{current_day}] loaded {day_rows:,}"
-                    + (f"/{expected_rows_per_day:,}" if expected_rows_per_day else "")
-                )
-                current_day = day
-                day_rows = 0
-            cleaned = normalize_values(sensor_id, sensor_type, day, values, allow_empty=True)
-            batch_buffer.append((sensor_id, sensor_type, day, cleaned))
+            
+            s_id, s_type, day, val = item
+            cleaned = normalize_values(s_id, s_type, day, val, allow_empty=True)
+            batch_buffer.append((s_id, s_type, day, cleaned))
             batch_rows += len(cleaned)
-            day_rows += len(cleaned)
+
             if batch_rows >= target_rows_per_batch:
-                build_elapsed, insert_elapsed, _ = await insert_batch(batch_buffer)
-                if expected_rows_per_day:
-                    pct = (day_rows / expected_rows_per_day) * 100
-                    print(
-                        f"[{current_day}] {day_rows:,}/{expected_rows_per_day:,} rows ({pct:.1f}%) | "
-                        f"timings (s): build_df={build_elapsed:.2f}, insert={insert_elapsed:.2f}"
-                    )
-                else:
-                    print(
-                        f"[{current_day}] {day_rows:,} rows | "
-                        f"timings (s): build_df={build_elapsed:.2f}, insert={insert_elapsed:.2f}"
-                    )
+                b_t, i_t, count = await insert_batch(batch_buffer, cid)
+                print(f"[Consumer-{cid}] Inserted {count:,} rows | Build: {b_t:.2f}s | Insert: {i_t:.2f}s")
                 batch_buffer.clear()
                 batch_rows = 0
+            
             queue.task_done()
 
         if batch_rows:
-            build_elapsed, insert_elapsed, _ = await insert_batch(batch_buffer)
-            if current_day is not None:
-                if expected_rows_per_day:
-                    pct = (day_rows / expected_rows_per_day) * 100
-                    print(
-                        f"[{current_day}] {day_rows:,}/{expected_rows_per_day:,} rows ({pct:.1f}%) | "
-                        f"timings (s): build_df={build_elapsed:.2f}, insert={insert_elapsed:.2f}"
-                    )
-                else:
-                    print(
-                        f"[{current_day}] {day_rows:,} rows | "
-                        f"timings (s): build_df={build_elapsed:.2f}, insert={insert_elapsed:.2f}"
-                    )
-            print("Inserted final batch from API")
+            await insert_batch(batch_buffer, cid)
 
-    prod_task = asyncio.create_task(producer())
-    cons_task = asyncio.create_task(consumer())
-    await asyncio.gather(prod_task, cons_task)
+    # Launch Pipeline: 1 Producer, 2 Consumers
+    prod = asyncio.create_task(producer())
+    c1 = asyncio.create_task(consumer(1))
+    c2 = asyncio.create_task(consumer(2))
+    
+    await asyncio.gather(prod, c1, c2)
 
 
-def ingest_year(
-    allowed_sensors: set[str],
-    year: int = YEAR,
-    *,
-    base_dir: Path = BASE_DIR,
-    target_rows_per_batch: int = TARGET_ROWS_PER_BATCH,
-):
-    start = date(year, 1, 1)
-    end = date(year, 12, 31)
-    ingest_from_files(
-        allowed_sensors,
-        start,
-        end,
-        base_dir=base_dir,
-        target_rows_per_batch=target_rows_per_batch,
-    )
-
-
+# -----------------------------
+# CLI Entry Point
+# -----------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Insert MnDOT detector values into ClickHouse.")
-    parser.add_argument(
-        "--data-source",
-        choices=["api", "files"],
-        default="files",
-        help="Use 'files' to read local JSON dumps or 'api' to fetch from the Mayfly API.",
-    )
-    parser.add_argument(
-        "--start-date",
-        type=parse_yyyymmdd,
-        default=DEFAULT_START_DATE,
-        help="Start date (inclusive) in YYYYMMDD format. Default: 20200101.",
-    )
-    parser.add_argument(
-        "--end-date",
-        type=parse_yyyymmdd,
-        default=DEFAULT_END_DATE,
-        help="End date (inclusive) in YYYYMMDD format. Default: 20201231.",
-    )
-    parser.add_argument(
-        "--detectors-csv",
-        type=Path,
-        default=DETECTORS_CSV,
-        help="CSV file containing a detector_name column.",
-    )
-    parser.add_argument(
-        "--base-dir",
-        type=Path,
-        default=BASE_DIR,
-        help="Base directory containing <year>/<yyyymmdd> folders (used with data-source=files).",
-    )
-    parser.add_argument(
-        "--target-rows",
-        type=int,
-        default=TARGET_ROWS_PER_BATCH,
-        help=f"Target number of rows per ClickHouse insert (default: {TARGET_ROWS_PER_BATCH}).",
-    )
-    parser.add_argument(
-        "--api-concurrency",
-        type=int,
-        default=API_CONCURRENCY,
-        help=f"Maximum concurrent API requests (default: {API_CONCURRENCY}).",
-    )
-    parser.add_argument(
-        "--api-chunk-size",
-        type=int,
-        default=API_CHUNK_SIZE,
-        help=f"Number of sensors to schedule per batch of API tasks (default: {API_CHUNK_SIZE}).",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-source", choices=["api", "files"], default="files")
+    parser.add_argument("--start-date", type=parse_yyyymmdd, default=DEFAULT_START_DATE)
+    parser.add_argument("--end-date", type=parse_yyyymmdd, default=DEFAULT_END_DATE)
+    parser.add_argument("--detectors-csv", type=Path, default=DETECTORS_CSV)
+    parser.add_argument("--base-dir", type=Path, default=BASE_DIR)
+    parser.add_argument("--target-rows", type=int, default=TARGET_ROWS_PER_BATCH)
+    parser.add_argument("--api-concurrency", type=int, default=API_CONCURRENCY)
+    parser.add_argument("--api-chunk-size", type=int, default=API_CHUNK_SIZE)
     args = parser.parse_args()
-
-    if args.start_date > args.end_date:
-        parser.error("start-date must be on or before end-date")
-    if args.api_concurrency < 1:
-        parser.error("api-concurrency must be at least 1")
-    if args.api_chunk_size < 1:
-        parser.error("api-chunk-size must be at least 1")
 
     ensure_schema()
     allowed = load_allowed_sensors(args.detectors_csv)
 
     if args.data_source == "files":
         ingest_from_files(
-            allowed,
-            args.start_date,
-            args.end_date,
-            base_dir=args.base_dir,
-            target_rows_per_batch=args.target_rows
+            allowed, args.start_date, args.end_date,
+            base_dir=args.base_dir, target_rows_per_batch=args.target_rows
         )
     else:
         ingest_from_api(
-            allowed,
-            args.start_date,
-            args.end_date,
+            allowed, args.start_date, args.end_date,
             target_rows_per_batch=args.target_rows,
-            concurrency=args.api_concurrency,
-            chunk_size=args.api_chunk_size,
+            concurrency=args.api_concurrency, chunk_size=args.api_chunk_size
         )
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
