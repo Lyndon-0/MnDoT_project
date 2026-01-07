@@ -150,9 +150,10 @@ def normalize_values(
     return cleaned
 
 
-def build_batch_dataframe(batch_buffer: list[tuple[str, str, date, np.ndarray]]) -> pd.DataFrame:
+def build_batch_columns(batch_buffer: list[tuple[str, str, date, np.ndarray]]) -> tuple[list[str], list[np.ndarray]]:
+    column_names = ["sensor_id", "sensor_type", "ts", "value"]
     if not batch_buffer:
-        return pd.DataFrame()
+        return column_names, []
 
     sensor_ids, sensor_types, days, values_list = zip(*batch_buffer)
     rows_per_sensor = values_list[0].shape[0]
@@ -163,18 +164,16 @@ def build_batch_dataframe(batch_buffer: list[tuple[str, str, date, np.ndarray]])
     one_day_offsets = np.arange(rows_per_sensor, dtype="timedelta64[30s]")
     day_starts = np.array(days, dtype="datetime64[s]")
     
-    # Correct broadcasting for timestamp generation
     ts_col = (day_starts[:, np.newaxis] + one_day_offsets).reshape(-1)
     values_col = np.concatenate(values_list)
 
-    return pd.DataFrame(
-        {
-            "sensor_id": ids_col,
-            "sensor_type": types_col,
-            "ts": ts_col,
-            "value": values_col,
-        }
-    )
+    order = np.lexsort((ts_col.view("int64"), types_col, ids_col))
+    ids_col = ids_col[order]
+    types_col = types_col[order]
+    ts_col = ts_col[order].astype("datetime64[s]").astype(object)
+    values_col = _nan_to_none(values_col[order])
+
+    return column_names, [ids_col, types_col, ts_col, values_col]
 
 
 def values_to_df(sensor_id, sensor_type, day, values, allow_empty=False):
@@ -214,30 +213,40 @@ def get_sensors_client():
     return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=DB)
 
 
-def dataframe_to_column_arrays(df: pd.DataFrame) -> tuple[list[str], list[list]]:
+def _nan_to_none(values: np.ndarray) -> np.ndarray:
+    if not np.issubdtype(values.dtype, np.floating):
+        return values
+    mask = np.isnan(values)
+    if not mask.any():
+        return values
+    out = values.astype(object)
+    out[mask] = None
+    return out
+
+
+def dataframe_to_column_arrays(df: pd.DataFrame) -> tuple[list[str], list[np.ndarray]]:
     column_names = ["sensor_id", "sensor_type", "ts", "value"]
     if df.empty:
         return column_names, []
     
-    # Optimization: Use direct numpy arrays where possible to avoid list overhead
+    ts_col = df["ts"].to_numpy(copy=False).astype("datetime64[s]").astype(object)
     data = [
-        df["sensor_id"].tolist(),
-        df["sensor_type"].tolist(),
-        df["ts"].tolist(), # ClickHouse Connect handles datetime64[ns]
-        df["value"].where(pd.notna(df["value"]), None).tolist(),
+        df["sensor_id"].to_numpy(copy=False),
+        df["sensor_type"].to_numpy(copy=False),
+        ts_col,
+        _nan_to_none(df["value"].to_numpy(dtype="float64", na_value=np.nan)),
     ]
     return column_names, data
 
 
-def insert_column_arrays(client, table: str, df: pd.DataFrame, *, settings: dict | None = None):
-    column_names, data = dataframe_to_column_arrays(df)
+def insert_column_arrays(client, table: str, column_names: list[str], data: list[np.ndarray], *, settings: dict | None = None):
     if not data:
         return
     client.insert(
         table,
         data,
-        column_names=column_names,
         column_oriented=True,
+        column_names=column_names,
         settings=settings or {},
     )
 
@@ -312,7 +321,8 @@ def ingest_from_files(
                 concat_elapsed = time.perf_counter() - concat_start
 
                 insert_start = time.perf_counter()
-                insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
+                col_names, data = dataframe_to_column_arrays(big)
+                insert_column_arrays(client, CH_TABLE, col_names, data, settings=insert_settings)
                 insert_elapsed = time.perf_counter() - insert_start
 
                 print(
@@ -326,7 +336,8 @@ def ingest_from_files(
 
     if batch:
         big = pd.concat(batch, ignore_index=True)
-        insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
+        col_names, data = dataframe_to_column_arrays(big)
+        insert_column_arrays(client, CH_TABLE, col_names, data, settings=insert_settings)
         print(f"Inserted final {len(big):,} rows from files.")
 
 
@@ -401,25 +412,21 @@ async def ingest_from_api_async(
         loop = asyncio.get_running_loop()
         build_start = time.perf_counter()
         
-        # CPU work: Build DataFrame
-        big = await loop.run_in_executor(None, build_batch_dataframe, batch_buffer)
-        
-        # CPU work: Sort by Primary Key
-        if not big.empty:
-            big.sort_values(by=["sensor_id", "sensor_type", "ts"], inplace=True)
-            
+        # CPU work: Build column arrays
+        column_names, data = await loop.run_in_executor(None, build_batch_columns, batch_buffer)
         build_elapsed = time.perf_counter() - build_start
         insert_elapsed = 0.0
+        row_count = data[0].shape[0] if data else 0
         
-        if not big.empty:
+        if data:
             insert_start = time.perf_counter()
             # IO work: Send to ClickHouse (blocks thread but other consumer continues)
             await loop.run_in_executor(
-                None, lambda: insert_column_arrays(client, CH_TABLE, big, settings=insert_settings)
+                None, lambda: insert_column_arrays(client, CH_TABLE, column_names, data, settings=insert_settings)
             )
             insert_elapsed = time.perf_counter() - insert_start
             
-        return build_elapsed, insert_elapsed, len(big)
+        return build_elapsed, insert_elapsed, row_count
 
     async def consumer(cid):
         batch_buffer = []
