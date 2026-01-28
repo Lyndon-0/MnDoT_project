@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -42,48 +41,53 @@ def build_layout() -> dbc.Container:
                 [
                     dbc.Col(
                         width=3,
+                        className="filters-panel",
                         children=[
                             html.H4("Filters"),
                             html.Hr(),
-                            dbc.Label("Corridor(s)"),
-                            dcc.Dropdown(
-                                id="corridors",
-                                options=[{"label": c, "value": c} for c in CORRIDOR_OPTIONS],
-                                value=CORRIDOR_OPTIONS,
-                                multi=True,
-                                clearable=False,
+                            html.Div(
+                                className="filter-block",
+                                children=[
+                                    dbc.Label("Corridor(s)"),
+                                    dcc.Dropdown(
+                                        id="corridors",
+                                        options=[{"label": c, "value": c} for c in CORRIDOR_OPTIONS],
+                                        value=CORRIDOR_OPTIONS,
+                                        multi=True,
+                                        clearable=False,
+                                    ),
+                                ],
                             ),
-                            html.Div(style={"height": "10px"}),
-                            dbc.Label("Sensor Type"),
-                            dcc.Dropdown(
-                                id="sensor-label",
-                                options=[{"label": s, "value": s} for s in SENSOR_LABELS],
-                                value="C30 (occupancy)",
-                                clearable=False,
+                            html.Div(
+                                className="filter-block",
+                                children=[
+                                    dbc.Label("Sensor Type"),
+                                    dcc.Dropdown(
+                                        id="sensor-label",
+                                        options=[{"label": s, "value": s} for s in SENSOR_LABELS],
+                                        value="C30 (occupancy)",
+                                        clearable=False,
+                                    ),
+                                ],
                             ),
-                            html.Div(style={"height": "10px"}),
-                            dbc.Label("Date Range"),
-                            dcc.DatePickerRange(
-                                id="date-range",
-                                start_date=date(2020, 3, 5),
-                                end_date=date(2020, 3, 31),
-                                display_format="YYYY-MM-DD",
-                                minimum_nights=0,
+                            html.Div(
+                                className="filter-block",
+                                children=[
+                                    dbc.Label("Date Range"),
+                                    dcc.DatePickerRange(
+                                        id="date-range",
+                                        start_date=date(2020, 3, 5),
+                                        end_date=date(2020, 3, 31),
+                                        display_format="YYYY-MM-DD",
+                                        minimum_nights=0,
+                                    ),
+                                ],
                             ),
-                            html.Div(style={"height": "10px"}),
-                            dbc.Button(
-                                "Clear cache (debug)",
-                                id="clear-cache",
-                                color="secondary",
-                                outline=True,
-                            ),
-                            html.Div(style={"height": "10px"}),
                             dbc.Alert(id="validation-alert", color="warning", is_open=False),
-                            html.Div(style={"height": "10px"}),
                             dbc.Accordion(
                                 [
                                     dbc.AccordionItem(
-                                        title="Threshoulds",
+                                        title="Thresholds",
                                         children=[
                                             dbc.Label("conZeroVol"),
                                             dbc.Input(
@@ -171,6 +175,7 @@ def build_layout() -> dbc.Container:
                     ),
                     dbc.Col(
                         width=9,
+                        className="main-panel",
                         children=[
                             html.H3("MnDOT Detector Monitor"),
                             html.Div(
@@ -178,37 +183,13 @@ def build_layout() -> dbc.Container:
                                 style={"color": "#6B7280"},
                             ),
                             html.Div(style={"height": "8px"}),
-                            html.Div(id="debug-caption", style={"color": "#6B7280"}),
                             html.Hr(),
-                            html.H5("Map / Click a sensor (opens time-series panel)"),
+                            html.H5("Map / Click a sensor (opens time-series)"),
                             dcc.Graph(
                                 id="map-graph",
                                 figure=empty_map_figure(),
                                 config={"displayModeBar": False},
                                 style={"height": "700px"},
-                            ),
-                            html.Div(style={"height": "10px"}),
-                            dbc.Row(
-                                [
-                                    dbc.Col(
-                                        width=4,
-                                        children=[
-                                            dbc.Label("Manual open target"),
-                                            dcc.Dropdown(
-                                                id="manual-sensor",
-                                                options=[],
-                                                value=None,
-                                                clearable=False,
-                                            ),
-                                            html.Div(style={"height": "8px"}),
-                                            dbc.Button(
-                                                "Open time-series panel",
-                                                id="manual-open",
-                                                color="primary",
-                                            ),
-                                        ],
-                                    ),
-                                ]
                             ),
                         ],
                     ),
@@ -245,27 +226,6 @@ def build_layout() -> dbc.Container:
             ),
         ],
     )
-
-
-def make_debug_caption(df_show: pd.DataFrame) -> str:
-    shown = len(df_show)
-    with_data = int(df_show["has_data"].sum()) if (shown and "has_data" in df_show.columns) else 0
-    anomalous = int(df_show["anomalous"].sum()) if (shown and "anomalous" in df_show.columns) else 0
-    return f"Debug: sensors shown={shown:,}, with_data={with_data:,}, anomalous={anomalous:,}"
-
-
-def make_manual_sensor_options(df_show: pd.DataFrame) -> List[Dict[str, str]]:
-    if df_show.empty or "sensor_id" not in df_show.columns:
-        return []
-    return [{"label": sid, "value": sid} for sid in df_show["sensor_id"].astype(str).tolist()]
-
-
-def choose_manual_value(sensor_options: List[Dict[str, str]], active_sensor: Optional[str]) -> Optional[str]:
-    values = {o.get("value") for o in sensor_options}
-    if active_sensor and active_sensor in values:
-        return active_sensor
-    return sensor_options[0]["value"] if sensor_options else None
-
 
 def build_map_figure(df_show: pd.DataFrame) -> go.Figure:
     if df_show.empty or df_show[["lat", "lon"]].dropna().empty:
