@@ -20,7 +20,7 @@ from .backend import (
     fetch_neg_vol_cnt,
     fetch_occ_lock_on,
     fetch_precomputed_metrics_for_sensors,
-    fetch_raw_count,
+    fetch_raw_counts,
     fetch_ts_joined,
     fetch_vol_on_low_occ,
     fetch_zvol_on_occ,
@@ -31,10 +31,7 @@ from .config import UI2DB_SENSOR
 from .ui import (
     build_map_figure,
     build_ts_figure,
-    choose_manual_value,
     empty_map_figure,
-    make_debug_caption,
-    make_manual_sensor_options,
 )
 
 
@@ -66,12 +63,8 @@ def register_callbacks(app, cache) -> None:
     @app.callback(
         Output("df-show-store", "data"),
         Output("map-graph", "figure"),
-        Output("manual-sensor", "options"),
-        Output("manual-sensor", "value"),
-        Output("debug-caption", "children"),
         Output("validation-alert", "is_open"),
         Output("validation-alert", "children"),
-        Input("clear-cache", "n_clicks"),
         Input("corridors", "value"),
         Input("sensor-label", "value"),
         Input("date-range", "start_date"),
@@ -87,10 +80,8 @@ def register_callbacks(app, cache) -> None:
         Input("threshold-constVol", "value"),
         Input("threshold-constOcc", "value"),
         Input("threshold-volOnLowOcc", "value"),
-        State("active-sensor-store", "data"),
     )
     def update_meta_and_map(
-        clear_cache_n,
         corridors,
         sensor_label,
         start_date_s,
@@ -106,24 +97,18 @@ def register_callbacks(app, cache) -> None:
         threshold_const_vol,
         threshold_const_occ,
         threshold_vol_on_low_occ,
-        active_sensor,
     ):
-        ctx = dash.callback_context
-        if clear_cache_n and any(t.get("prop_id") == "clear-cache.n_clicks" for t in (ctx.triggered or [])):
-            cache.clear()
-            return no_update, no_update, no_update, no_update, no_update, True, "Cache cleared (server-side)."
-
         corridors_norm, routes, directions = split_corridors(corridors)
         if not corridors_norm:
-            return None, empty_map_figure(), [], None, "", True, "No corridors selected."
+            return None, empty_map_figure(), True, "No corridors selected."
 
         if not start_date_s or not end_date_s:
-            return None, empty_map_figure(), [], None, "", True, "Start and end dates are required."
+            return None, empty_map_figure(), True, "Start and end dates are required."
 
         start_date = date.fromisoformat(start_date_s)
         end_date = date.fromisoformat(end_date_s)
         if end_date < start_date:
-            return None, empty_map_figure(), [], None, "", True, "End date must be on or after the start date."
+            return None, empty_map_figure(), True, "End date must be on or after the start date."
 
         sensor_type_db = UI2DB_SENSOR[sensor_label]
         start_day, end_day = start_date, end_date
@@ -151,7 +136,7 @@ def register_callbacks(app, cache) -> None:
 
         except Exception as e:
             msg = f"ClickHouse error while loading detector_meta: {e}"
-            return None, empty_map_figure(), [], None, "", True, msg
+            return None, empty_map_figure(), True, msg
 
         if not df_show.empty:
             selected_set = set(corridors_norm)
@@ -159,12 +144,9 @@ def register_callbacks(app, cache) -> None:
             df_show = df_show.loc[corridor_col.isin(selected_set)].reset_index(drop=True)
 
         if df_show.empty:
-            debug_caption = "Debug: sensors shown=0, with_data=0, anomalous=0"
             fig = empty_map_figure()
-            sensor_options = []
-            manual_value = None
             records = []
-            return records, fig, sensor_options, manual_value, debug_caption, False, ""
+            return records, fig, False, ""
 
         def parse_threshold(value):
             try:
@@ -219,13 +201,10 @@ def register_callbacks(app, cache) -> None:
             axis=1,
         )
 
-        debug_caption = make_debug_caption(df_show)
-        sensor_options = make_manual_sensor_options(df_show)
-        manual_value = choose_manual_value(sensor_options, active_sensor)
         fig = build_map_figure(df_show)
 
         records = df_show.to_dict("records")
-        return records, fig, sensor_options, manual_value, debug_caption, False, ""
+        return records, fig, False, ""
 
     @app.callback(
         Output("ts-modal", "is_open"),
@@ -233,29 +212,17 @@ def register_callbacks(app, cache) -> None:
         Output("active-signature-store", "data"),
         Output("dismissed-signature-store", "data"),
         Input("map-graph", "clickData"),
-        Input("manual-open", "n_clicks"),
         Input("ts-modal", "is_open"),
-        State("manual-sensor", "value"),
         State("active-sensor-store", "data"),
         State("active-signature-store", "data"),
         State("dismissed-signature-store", "data"),
-        State("corridors", "value"),
-        State("sensor-label", "value"),
-        State("date-range", "start_date"),
-        State("date-range", "end_date"),
     )
     def handle_open_close(
         clickData,
-        manual_open_n,
         modal_is_open,
-        manual_sensor_id,
         active_sensor,
         active_sig,
         dismissed_sig,
-        corridors,
-        sensor_label,
-        start_date_s,
-        end_date_s,
     ):
         ctx = dash.callback_context
         if not ctx.triggered:
@@ -287,20 +254,6 @@ def register_callbacks(app, cache) -> None:
                 return True, active_sensor, active_sig, dismissed_sig
 
             return True, sensor_id, signature, dismissed_sig
-
-        if trigger == "manual-open.n_clicks":
-            if not manual_open_n:
-                raise PreventUpdate
-            if not manual_sensor_id:
-                raise PreventUpdate
-
-            sensor_type_db = UI2DB_SENSOR[sensor_label]
-            corridors_norm, _, _ = split_corridors(corridors)
-            signature = (
-                f"manual:{manual_sensor_id}:{sensor_type_db}:{start_date_s}:{end_date_s}:"
-                f"{','.join(sorted(corridors_norm or []))}"
-            )
-            return True, str(manual_sensor_id), signature, dismissed_sig
 
         raise PreventUpdate
 
@@ -388,16 +341,17 @@ def register_callbacks(app, cache) -> None:
             )
             cached_ts = cache.get(ts_key)
 
-            raw_rows = fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt)
+            raw_rows, nonnull_raw_rows = fetch_raw_counts(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt)
 
             if cached_ts is None:
                 df_ts = fetch_ts_joined(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt, bucket_s)
-                df_ts["ts"] = pd.to_datetime(df_ts["ts"])
                 cache.set(ts_key, df_ts.to_dict("records"))
             else:
                 df_ts = pd.DataFrame.from_records(cached_ts)
-                if not df_ts.empty:
-                    df_ts["ts"] = pd.to_datetime(df_ts["ts"])
+
+            if not df_ts.empty:
+                df_ts["ts"] = pd.to_datetime(df_ts["ts"], errors="coerce")
+                df_ts["value"] = pd.to_numeric(df_ts["value"], errors="coerce")
 
             metrics_key_base = ts_cache_key(
                 sensor_id,
@@ -577,8 +531,17 @@ def register_callbacks(app, cache) -> None:
         total_metrics = len(metric_values)
         required = (total_metrics + 1) // 2
         is_anomalous = exceed_count >= required
-        status_color = "#DC2626" if is_anomalous else "#16A34A"
-        status_text = "Anomalous" if is_anomalous else "Healthy"
+
+        ts_points = int(len(df_ts))
+        ts_points_nonnull = int(df_ts["value"].notna().sum()) if (not df_ts.empty and "value" in df_ts.columns) else 0
+
+        if nonnull_raw_rows <= 0 or ts_points_nonnull <= 0:
+            status_color = "#9CA3AF"
+            status_text = "No data"
+        else:
+            status_color = "#DC2626" if is_anomalous else "#16A34A"
+            status_text = "Anomalous" if is_anomalous else "Healthy"
+
         status_component = html.Div(
             [
                 html.Span(
@@ -598,7 +561,10 @@ def register_callbacks(app, cache) -> None:
             style={"display": "flex", "alignItems": "center", "gap": "8px"},
         )
 
-        debug = f"Debug: raw rows matching filters = {raw_rows:,} | chart points returned (aggregated) = {len(df_ts):,}"
+        debug = (
+            f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
+            f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null)"
+        )
 
         if df_ts.empty:
             return (
@@ -608,6 +574,18 @@ def register_callbacks(app, cache) -> None:
                 debug,
                 True,
                 "No time-series rows returned for this sensor under the current filters/range.",
+                go.Figure(),
+                "",
+            )
+
+        if ts_points_nonnull <= 0:
+            return (
+                f"Detector {sensor_id}",
+                meta_line,
+                status_component,
+                debug,
+                True,
+                "Time-series rows exist, but all aggregated values are NULL (no non-null readings in this range).",
                 go.Figure(),
                 "",
             )

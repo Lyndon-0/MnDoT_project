@@ -128,7 +128,7 @@ def fetch_meta_with_presence(routes, directions, sensor_type_db, start_day, end_
         FROM detector_meta AS m
         LEFT JOIN
         (
-            SELECT sensor_id, count() AS cnt
+            SELECT sensor_id, countIf(isNotNull(value)) AS cnt
             FROM raw_30s
             WHERE toString(sensor_type) = {sensor_type:String}
               AND day >= {start_day:Date} AND day <= {end_day:Date}
@@ -202,6 +202,38 @@ def fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end
         },
     )
     return int(df["raw_rows"].iloc[0]) if not df.empty else 0
+
+
+def fetch_raw_counts(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt) -> tuple[int, int]:
+    """
+    Returns (raw_rows, nonnull_rows) under the same filters used for the time-series chart.
+    """
+    sql = """
+        SELECT
+            count() AS raw_rows,
+            countIf(isNotNull(r.value)) AS nonnull_rows
+        FROM raw_30s AS r
+        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+        WHERE r.sensor_id = {sensor_id:String}
+          AND toString(r.sensor_type) = {sensor_type:String}
+          AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
+          AND m.route IN {routes:Array(String)}
+          AND m.direction IN {directions:Array(String)}
+    """
+    df = ch().query_df(
+        sql,
+        parameters={
+            "sensor_id": str(sensor_id),
+            "sensor_type": str(sensor_type_db),
+            "start": start_dt,
+            "end": end_dt,
+            "routes": routes,
+            "directions": directions,
+        },
+    )
+    if df.empty:
+        return 0, 0
+    return int(df["raw_rows"].iloc[0]), int(df["nonnull_rows"].iloc[0])
 
 
 def fetch_con_zero_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end_dt, min_run_slots: int = 20) -> int:
