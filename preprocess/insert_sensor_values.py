@@ -15,8 +15,8 @@ import orjson
 # -----------------------------
 # Config
 # -----------------------------
-BASE_DIR = Path("/data/pouya_data/mndot_raw_data")
-DETECTORS_CSV = Path("/home/MnDoT_project/preprocess/detectors_minneapolis_radius_25.0km.csv")
+BASE_DIR = Path(os.environ.get("RAW_DATA_DIR", "/data/pouya_data/mndot_raw_data"))
+DETECTORS_CSV = Path(__file__).resolve().parent / "detectors_minneapolis_radius_25.0km.csv"
 YEAR = 2020
 
 CH_HOST = os.environ.get("CH_HOST", "127.0.0.1")

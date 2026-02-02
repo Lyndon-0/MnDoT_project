@@ -1,0 +1,31 @@
+services:
+  api:
+    build: .
+    image: mndot_project:latest
+    restart: always
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - CH_HOST=${CH_HOST:-host.docker.internal}
+      - CH_PORT=${CH_PORT:-8123}
+      - CH_DB=${CH_DB:-sensors}
+      - CH_USER=${CH_USER:-}
+      - CH_PASSWORD=${CH_PASSWORD:-}
+
+  daily_metrics:
+    image: mndot_project:latest
+    restart: always
+    command: ["python", "scheduler.py"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - CH_HOST=${CH_HOST:-host.docker.internal}
+      - CH_PORT=${CH_PORT:-8123}
+      - CH_DB=${CH_DB:-sensors}
+      - CH_USER=${CH_USER:-}
+      - CH_PASSWORD=${CH_PASSWORD:-}
+      - JOB_TZ=${JOB_TZ:-America/Chicago}
+      - PYTHONUNBUFFERED=1
+
