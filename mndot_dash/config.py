@@ -1,5 +1,12 @@
-CH_HOST, CH_PORT, CH_DB = "127.0.0.1", 8123, "sensors"
-DAILY_METRICS_TABLE = "daily_metrics"
+import os
+
+
+CH_HOST = os.environ.get("CH_HOST", "127.0.0.1")
+CH_PORT = int(os.environ.get("CH_PORT", "8123"))
+CH_DB = os.environ.get("CH_DB", "sensors")
+CH_USER = os.environ.get("CH_USER", "")
+CH_PASSWORD = os.environ.get("CH_PASSWORD", "")
+DAILY_METRICS_TABLE = os.environ.get("DAILY_METRICS_TABLE", "daily_metrics")
 
 ROUTE_OPTIONS = ["I-94", "I-494", "I-35E", "I-35W", "I-694"]
 DIRECTION_OPTIONS = ["EB", "NB", "SB", "WB"]

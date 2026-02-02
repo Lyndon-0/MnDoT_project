@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 import time
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -18,9 +19,11 @@ BASE_DIR = Path("/data/pouya_data/mndot_raw_data")
 DETECTORS_CSV = Path("/home/MnDoT_project/preprocess/detectors_minneapolis_radius_25.0km.csv")
 YEAR = 2020
 
-CH_HOST = "127.0.0.1"
-CH_PORT = 8123
-DB = "sensors"
+CH_HOST = os.environ.get("CH_HOST", "127.0.0.1")
+CH_PORT = int(os.environ.get("CH_PORT", "8123"))
+DB = os.environ.get("CH_DB", "sensors")
+CH_USER = os.environ.get("CH_USER", "")
+CH_PASSWORD = os.environ.get("CH_PASSWORD", "")
 TABLE = "raw_30s"
 CH_TABLE = TABLE
 
@@ -45,7 +48,12 @@ SENSOR_TYPE_TO_ENDPOINT = {
 
 
 def ensure_schema():
-    client = clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database="default")
+    kwargs = {}
+    if CH_USER:
+        kwargs["username"] = CH_USER
+    if CH_PASSWORD:
+        kwargs["password"] = CH_PASSWORD
+    client = clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database="default", **kwargs)
     client.command(f"CREATE DATABASE IF NOT EXISTS {DB}")
 
     client.command(f"""
@@ -210,7 +218,24 @@ def file_to_df_with_timings(day: date, json_path: Path):
 
 
 def get_sensors_client():
-    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=DB)
+    kwargs = {}
+    if CH_USER:
+        kwargs["username"] = CH_USER
+    if CH_PASSWORD:
+        kwargs["password"] = CH_PASSWORD
+    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=DB, **kwargs)
+
+
+def delete_existing_range(client, start_date: date, end_date: date) -> None:
+    """
+    Delete existing rows in raw_30s for the inclusive [start_date, end_date] range.
+    Uses ClickHouse mutations; mutations_sync=1 ensures the delete finishes before inserts.
+    """
+    client.command(
+        f"ALTER TABLE {DB}.{CH_TABLE} DELETE WHERE day >= {{start_day:Date}} AND day <= {{end_day:Date}}",
+        parameters={"start_day": start_date, "end_day": end_date},
+        settings={"mutations_sync": 1},
+    )
 
 
 def _nan_to_none(values: np.ndarray) -> np.ndarray:
@@ -292,8 +317,14 @@ def ingest_from_files(
     base_dir: Path = BASE_DIR,
     *,
     target_rows_per_batch: int = TARGET_ROWS_PER_BATCH,
+    delete_existing: bool = False,
 ):
     client = get_sensors_client()
+    if delete_existing:
+        print(f"Deleting existing raw_30s rows for {start_date} → {end_date}...", end="", flush=True)
+        delete_existing_range(client, start_date, end_date)
+        print(" done")
+
     batch = []
     batch_rows = 0
     batch_timers = {"read": 0.0, "transform": 0.0}
@@ -349,6 +380,7 @@ def ingest_from_api(
     target_rows_per_batch: int = TARGET_ROWS_PER_BATCH,
     concurrency: int = API_CONCURRENCY,
     chunk_size: int = API_CHUNK_SIZE,
+    delete_existing: bool = False,
 ):
     asyncio.run(
         ingest_from_api_async(
@@ -358,6 +390,7 @@ def ingest_from_api(
             target_rows_per_batch=target_rows_per_batch,
             concurrency=concurrency,
             chunk_size=chunk_size,
+            delete_existing=delete_existing,
         )
     )
 
@@ -370,8 +403,14 @@ async def ingest_from_api_async(
     target_rows_per_batch: int = TARGET_ROWS_PER_BATCH,
     concurrency: int = API_CONCURRENCY,
     chunk_size: int = API_CHUNK_SIZE,
+    delete_existing: bool = False,
 ):
     client = get_sensors_client()
+    if delete_existing:
+        print(f"Deleting existing raw_30s rows for {start_date} → {end_date}...", end="", flush=True)
+        delete_existing_range(client, start_date, end_date)
+        print(" done")
+
     # Async Insert + Wait reduces client-side blocking
     insert_settings = {'async_insert': 1, 'wait_for_async_insert': 1}
 
@@ -474,6 +513,11 @@ def main():
     parser.add_argument("--target-rows", type=int, default=TARGET_ROWS_PER_BATCH)
     parser.add_argument("--api-concurrency", type=int, default=API_CONCURRENCY)
     parser.add_argument("--api-chunk-size", type=int, default=API_CHUNK_SIZE)
+    parser.add_argument(
+        "--delete-existing",
+        action="store_true",
+        help="Delete existing raw_30s rows in the day range before inserting (uses ALTER TABLE ... DELETE).",
+    )
     args = parser.parse_args()
 
     ensure_schema()
@@ -482,13 +526,17 @@ def main():
     if args.data_source == "files":
         ingest_from_files(
             allowed, args.start_date, args.end_date,
-            base_dir=args.base_dir, target_rows_per_batch=args.target_rows
+            base_dir=args.base_dir,
+            target_rows_per_batch=args.target_rows,
+            delete_existing=args.delete_existing,
         )
     else:
         ingest_from_api(
             allowed, args.start_date, args.end_date,
             target_rows_per_batch=args.target_rows,
-            concurrency=args.api_concurrency, chunk_size=args.api_chunk_size
+            concurrency=args.api_concurrency,
+            chunk_size=args.api_chunk_size,
+            delete_existing=args.delete_existing,
         )
 
 if __name__ == "__main__":

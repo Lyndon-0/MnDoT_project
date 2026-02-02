@@ -7,7 +7,7 @@ import pandas as pd
 
 import clickhouse_connect
 
-from .config import CH_HOST, CH_PORT, CH_DB, DAILY_METRICS_TABLE
+from .config import CH_HOST, CH_PASSWORD, CH_PORT, CH_DB, CH_USER, DAILY_METRICS_TABLE
 
 
 PRECOMPUTED_MIN_RUN_SLOTS = 20
@@ -16,7 +16,12 @@ PRECOMPUTED_OCC_THRESHOLD = 0.2
 
 @lru_cache(maxsize=1)
 def ch():
-    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB)
+    kwargs = {}
+    if CH_USER:
+        kwargs["username"] = CH_USER
+    if CH_PASSWORD:
+        kwargs["password"] = CH_PASSWORD
+    return clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB, **kwargs)
 
 
 def fetch_precomputed_metric(metric: str, sensor_id, start_day: date, end_day: date, sensor_type: Optional[str] = None) -> Optional[int]:

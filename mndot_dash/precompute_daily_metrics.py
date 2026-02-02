@@ -8,10 +8,11 @@ from typing import Dict, Iterable, Optional, Tuple
 
 import clickhouse_connect
 
-from config import CH_DB, CH_HOST, CH_PORT, DAILY_METRICS_TABLE
+from config import CH_DB, CH_HOST, CH_PASSWORD, CH_PORT, CH_USER, DAILY_METRICS_TABLE
 
 
 RAW_TABLE = f"{CH_DB}.raw_30s"
+DEFAULT_START_DAY = date(2026, 1, 1)
 
 
 @dataclass
@@ -320,11 +321,6 @@ def parse_day(value: Optional[str]) -> Optional[date]:
 
 
 def detect_range(client, start_day: Optional[date], end_day: Optional[date]) -> Tuple[date, date]:
-    if start_day and end_day:
-        if end_day < start_day:
-            raise ValueError("end-day must be on or after start-day")
-        return start_day, end_day
-
     df = client.query_df("SELECT min(day) AS min_day, max(day) AS max_day FROM raw_30s")
     if df.empty or df["min_day"].isna().iloc[0] or df["max_day"].isna().iloc[0]:
         raise ValueError("raw_30s is empty; nothing to aggregate")
@@ -332,8 +328,17 @@ def detect_range(client, start_day: Optional[date], end_day: Optional[date]) -> 
     detected_start = df["min_day"].iloc[0].date()
     detected_end = df["max_day"].iloc[0].date()
 
-    start = start_day or detected_start
-    end = end_day or detected_end
+    # Defaults: start at 2026-01-01, end at "today" (clamped to max(raw_30s)).
+    start = start_day or DEFAULT_START_DAY
+    if end_day is None:
+        end = min(date.today(), detected_end)
+    else:
+        end = end_day
+
+    # Avoid asking ClickHouse to process an empty future range by default.
+    if start_day is None:
+        start = max(start, detected_start)
+
     if end < start:
         raise ValueError("end-day must be on or after start-day")
     return start, end
@@ -349,15 +354,20 @@ def run_jobs(client, table: str, jobs: Iterable[MetricJob]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Precompute daily MnDOT metrics into ClickHouse.")
     parser.add_argument("--table", default=DAILY_METRICS_TABLE, help="Destination ClickHouse table (default: daily_metrics)")
-    parser.add_argument("--start-day", dest="start_day", type=parse_day, help="Inclusive start day (YYYY-MM-DD). Defaults to min(raw_30s).")
-    parser.add_argument("--end-day", dest="end_day", type=parse_day, help="Inclusive end day (YYYY-MM-DD). Defaults to max(raw_30s).")
+    parser.add_argument("--start-day", dest="start_day", type=parse_day, help="Inclusive start day (YYYY-MM-DD). Defaults to 2026-01-01.")
+    parser.add_argument("--end-day", dest="end_day", type=parse_day, help="Inclusive end day (YYYY-MM-DD). Defaults to today (or max(raw_30s), whichever is earlier).")
     parser.add_argument("--min-run-slots", type=int, default=20, help="Minimum run length (30s slots) for const*/conZero* metrics (default: 20).")
     parser.add_argument("--occ-threshold", type=float, default=0.2, help="Occupancy threshold for volOnLowOcc (default: 0.2).")
     parser.add_argument("--delete-existing", action="store_true",
                         help="Delete existing rows in the target day range before inserting (uses ALTER TABLE ... DELETE).")
     args = parser.parse_args()
 
-    client = clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB)
+    kwargs = {}
+    if CH_USER:
+        kwargs["username"] = CH_USER
+    if CH_PASSWORD:
+        kwargs["password"] = CH_PASSWORD
+    client = clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database=CH_DB, **kwargs)
     ensure_metrics_table(client, args.table)
 
     start_day, end_day = detect_range(client, args.start_day, args.end_day)

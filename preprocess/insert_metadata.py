@@ -1,14 +1,17 @@
 import argparse
 import csv
+import os
 import sys
 from typing import List, Tuple
 
 import clickhouse_connect
 
 
-CH_HOST = "127.0.0.1"
-CH_PORT = 8123
-DB = "sensors"
+CH_HOST = os.environ.get("CH_HOST", "127.0.0.1")
+CH_PORT = int(os.environ.get("CH_PORT", "8123"))
+DB = os.environ.get("CH_DB", "sensors")
+CH_USER = os.environ.get("CH_USER", "")
+CH_PASSWORD = os.environ.get("CH_PASSWORD", "")
 
 
 def ensure_db_and_table(client, table: str) -> None:
@@ -92,11 +95,12 @@ def main() -> int:
                          "Use e.g. 5000 for much faster loads.")
     args = ap.parse_args()
 
-    client = clickhouse_connect.get_client(
-        host=CH_HOST,
-        port=CH_PORT,
-        database="default",
-    )
+    kwargs = {}
+    if CH_USER:
+        kwargs["username"] = CH_USER
+    if CH_PASSWORD:
+        kwargs["password"] = CH_PASSWORD
+    client = clickhouse_connect.get_client(host=CH_HOST, port=CH_PORT, database="default", **kwargs)
 
     ensure_db_and_table(client, args.table)
 

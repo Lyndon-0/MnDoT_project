@@ -13,6 +13,9 @@ import dash_bootstrap_components as dbc
 from .config import BLUE, CORRIDOR_OPTIONS, GRAY, SENSOR_LABELS
 
 
+DEFAULT_START_DAY = date(2026, 1, 1)
+
+
 def empty_map_figure(center=(44.97, -93.20), zoom=11) -> go.Figure:
     df0 = pd.DataFrame({"lat": [center[0]], "lon": [center[1]], "status": [""]})
     fig = px.scatter_map(
@@ -30,6 +33,7 @@ def empty_map_figure(center=(44.97, -93.20), zoom=11) -> go.Figure:
 
 
 def build_layout() -> dbc.Container:
+    today = date.today()
     return dbc.Container(
         fluid=True,
         children=[
@@ -76,8 +80,8 @@ def build_layout() -> dbc.Container:
                                     dbc.Label("Date Range"),
                                     dcc.DatePickerRange(
                                         id="date-range",
-                                        start_date=date(2020, 3, 5),
-                                        end_date=date(2020, 3, 31),
+                                        start_date=DEFAULT_START_DAY,
+                                        end_date=today,
                                         display_format="YYYY-MM-DD",
                                         minimum_nights=0,
                                     ),
