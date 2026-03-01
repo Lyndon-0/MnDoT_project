@@ -4,7 +4,9 @@ services:
   # -----------------------------------------------------------------
   clickhouse:
     image: ${CLICKHOUSE_IMAGE:-clickhouse/clickhouse-server:latest}
-    restart: unless-stopped
+    restart: no
+    # entrypoint: ["/usr/bin/clickhouse-server", "--config-file=/etc/clickhouse-server/config.xml"]
+    # command: ["--config-file=/etc/clickhouse-server/config.xml"]
     ports:
       # Bind to localhost by default so ClickHouse isn't exposed to the internet.
       # Remove the leading "127.0.0.1:" if you explicitly want remote access.
@@ -13,16 +15,22 @@ services:
     volumes:
       # Default is a named volume. Set CH_DATA_DIR to a path (e.g. /data/clickhouse) to use a bind-mount instead.
       - "${CH_DATA_DIR:-clickhouse_data}:/var/lib/clickhouse"
+      - "/data1/pouya_data/clickhouse/log:/var/log/clickhouse-server"
+      # - "./listen_fix.xml:/etc/clickhouse-server/config.d/listen_fix.xml"
+      # - "./default_user.xml:/etc/clickhouse-server/users.d/default_user.xml"
     ulimits:
       nofile:
         soft: 262144
         hard: 262144
     healthcheck:
-      test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --query 'SELECT 1' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
       timeout: 3s
-      retries: 20
-      start_period: 10s
+      retries: 30
+      start_period: 90s
+    environment:
+      CLICKHOUSE_DB: ${CH_DB:-sensors}
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
 
   # -----------------------------------------------------------------
   # Service 2: API
@@ -30,9 +38,18 @@ services:
   api:
     build: .
     image: mndot_project:latest
-    restart: unless-stopped
+    restart: no
     ports:
       - "${APP_PORT:-8000}:8000"
+    
+    # 1. Mount your local directory (.) to the container's working directory
+    volumes:
+      - .:/app
+    
+    # 2. Override the default startup command to include --reload
+    # (Adjust 'app:app' if your python instance is named differently, like 'main:app')
+    command: ["gunicorn", "--reload", "-b", "0.0.0.0:8000", "app:app"]
+
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -45,13 +62,13 @@ services:
       CH_USER: ${CH_USER:-}
       CH_PASSWORD: ${CH_PASSWORD:-}
 
-  # -----------------------------------------------------------------
-  # Service 3: Scheduler
-  # -----------------------------------------------------------------
+  # # -----------------------------------------------------------------
+  # # Service 3: Scheduler
+  # # -----------------------------------------------------------------
   daily_metrics:
     build: .
     image: mndot_project:latest
-    restart: unless-stopped
+    restart: no
     command: ["python", "scheduler.py"]
     depends_on:
       clickhouse:
