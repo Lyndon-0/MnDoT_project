@@ -245,15 +245,30 @@ def build_map_figure(df_show: pd.DataFrame) -> go.Figure:
         df_plot["status"] = df_plot["status_label"]
     else:
         df_plot["status"] = np.where(df_plot["has_data"], "Healthy", "No data")
-    lane_str = df_plot["lane"].apply(lambda x: "None" if pd.isna(x) else str(int(x)))
+
+    if "sensor_id" not in df_plot.columns:
+        df_plot["sensor_id"] = df_plot["name"].astype(str) if "name" in df_plot.columns else ""
+    if "station" not in df_plot.columns:
+        df_plot["station"] = ""
+    if "location" not in df_plot.columns:
+        route_col = df_plot["route"].astype(str) if "route" in df_plot.columns else ""
+        direction_col = df_plot["direction"].astype(str) if "direction" in df_plot.columns else ""
+        df_plot["location"] = (route_col + " " + direction_col).astype(str).str.strip()
+
+    lane_col = "lane" if "lane" in df_plot.columns else ("lane_number" if "lane_number" in df_plot.columns else None)
+    if lane_col is None:
+        lane_str = pd.Series(["None"] * len(df_plot), index=df_plot.index)
+    else:
+        lane_str = df_plot[lane_col].apply(lambda x: "None" if pd.isna(x) else str(int(x)))
+
     df_plot["tooltip"] = (
-        df_plot["route"].astype(str)
-        + " "
-        + df_plot["direction"].astype(str)
+        df_plot["location"].astype(str)
         + " lane "
         + lane_str
         + " ("
         + df_plot["sensor_id"].astype(str)
+        + " / "
+        + df_plot["station"].astype(str)
         + ") — "
         + df_plot["status"]
     )
@@ -270,7 +285,7 @@ def build_map_figure(df_show: pd.DataFrame) -> go.Figure:
             "status": False,
             "tooltip": False,
         },
-        custom_data=["sensor_id", "lat", "lon"],
+        custom_data=["sensor_id", "station", "lat", "lon"],
         zoom=12,
         center={"lat": center_lat, "lon": center_lon},
         map_style="open-street-map",

@@ -60,6 +60,17 @@ def register_callbacks(app, cache) -> None:
             directions.add(parts[1])
         return normalized, sorted(routes), sorted(directions)
 
+    def match_corridor_from_location(location_text: str, corridors_norm: list[str]) -> str:
+        loc = str(location_text).upper()
+        for corridor in corridors_norm:
+            parts = corridor.split()
+            if len(parts) < 2:
+                continue
+            route, direction = parts[0].upper(), parts[1].upper()
+            if route in loc and direction in loc:
+                return corridor
+        return ""
+
     @app.callback(
         Output("df-show-store", "data"),
         Output("map-graph", "figure"),
@@ -121,7 +132,10 @@ def register_callbacks(app, cache) -> None:
                 df_show = fetch_meta_with_presence(routes, directions, sensor_type_db, start_day, end_day)
                 for c in ["lat", "lon"]:
                     df_show[c] = pd.to_numeric(df_show[c], errors="coerce")
-                df_show["sensor_id"] = df_show["sensor_id"].astype(str)
+                df_show["name"] = df_show["name"].astype(str)
+                df_show["station"] = df_show["station"].astype(str)
+                df_show["location"] = df_show["location"].astype(str)
+                df_show["sensor_id"] = df_show["name"]
                 df_show["lane"] = pd.to_numeric(df_show["lane"], errors="coerce")
                 df_show["has_data"] = df_show["has_data"].astype(bool)
 
@@ -131,17 +145,18 @@ def register_callbacks(app, cache) -> None:
                 raw_records = cached
 
             df_show = pd.DataFrame.from_records(raw_records) if raw_records else pd.DataFrame(
-                columns=["sensor_id", "route", "direction", "lat", "lon", "lane", "has_data"]
+                columns=["sensor_id", "name", "station", "location", "lat", "lon", "lane", "has_data"]
             )
 
         except Exception as e:
-            msg = f"ClickHouse error while loading detector_meta: {e}"
+            msg = f"ClickHouse error while loading detectors_meta_info: {e}"
             return None, empty_map_figure(), True, msg
 
         if not df_show.empty:
-            selected_set = set(corridors_norm)
-            corridor_col = df_show["route"].astype(str).str.strip() + " " + df_show["direction"].astype(str).str.strip()
-            df_show = df_show.loc[corridor_col.isin(selected_set)].reset_index(drop=True)
+            df_show["matched_corridor"] = df_show["location"].apply(
+                lambda loc: match_corridor_from_location(loc, corridors_norm)
+            )
+            df_show = df_show.loc[df_show["matched_corridor"] != ""].reset_index(drop=True)
 
         if df_show.empty:
             fig = empty_map_figure()
@@ -240,20 +255,22 @@ def register_callbacks(app, cache) -> None:
                 raise PreventUpdate
 
             cd = clickData["points"][0].get("customdata", None)
-            if not cd or len(cd) < 3:
+            if not cd or len(cd) < 4:
                 raise PreventUpdate
 
-            sensor_id = str(cd[0])
-            lat = float(cd[1])
-            lon = float(cd[2])
-            signature = f"{sensor_id}|{lat:.6f},{lon:.6f}"
+            sensor_name = str(cd[0])
+            station = "" if cd[1] is None else str(cd[1])
+            lat = float(cd[2])
+            lon = float(cd[3])
+            signature = f"{sensor_name}|{station}|{lat:.6f},{lon:.6f}"
+            payload = {"name": sensor_name, "station": station}
 
             if signature == dismissed_sig:
                 return False, active_sensor, active_sig, dismissed_sig
             if signature == active_sig:
                 return True, active_sensor, active_sig, dismissed_sig
 
-            return True, sensor_id, signature, dismissed_sig
+            return True, payload, signature, dismissed_sig
 
         raise PreventUpdate
 
@@ -286,7 +303,7 @@ def register_callbacks(app, cache) -> None:
     )
     def update_ts_modal(
         is_open,
-        sensor_id,
+        sensor_payload,
         corridors,
         sensor_label,
         start_date_s,
@@ -303,6 +320,13 @@ def register_callbacks(app, cache) -> None:
         threshold_zvol_on_occ,
         threshold_vol_on_low_occ,
     ):
+        if isinstance(sensor_payload, dict):
+            sensor_id = str(sensor_payload.get("name", "")).strip()
+            sensor_station = str(sensor_payload.get("station", "")).strip()
+        else:
+            sensor_id = str(sensor_payload or "").strip()
+            sensor_station = ""
+
         if not is_open or not sensor_id:
             return "", "", "", "", False, "", go.Figure(), ""
 
@@ -323,7 +347,7 @@ def register_callbacks(app, cache) -> None:
         bucket_s = choose_bucket_seconds(start_date, end_date)
 
         meta_line = (
-            f"Detector: {sensor_id} | Sensor: {sensor_type_db} | "
+            f"Detector: {sensor_id} | Station: {sensor_station} | Sensor: {sensor_type_db} | "
             f"Range: {start_date:%Y-%m-%d} → {end_date:%Y-%m-%d} | "
             f"Corridor(s): {', '.join(sorted(corridors_norm))} | "
             f"Bucket: {bucket_s}s"

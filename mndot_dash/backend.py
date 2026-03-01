@@ -128,9 +128,15 @@ def choose_bucket_seconds(start_date: date, end_date: date) -> int:
 def fetch_meta_with_presence(routes, directions, sensor_type_db, start_day, end_day) -> pd.DataFrame:
     sql = """
         SELECT
-            m.sensor_id, m.route, m.direction, m.lat, m.lon, m.lane,
+            m.name AS sensor_id,
+            m.name AS name,
+            m.station AS station,
+            m.location AS location,
+            m.lat AS lat,
+            m.lon AS lon,
+            m.lane_number AS lane,
             (ifNull(d.cnt, 0) > 0) AS has_data
-        FROM detector_meta AS m
+        FROM detectors_meta_info AS m
         LEFT JOIN
         (
             SELECT sensor_id, countIf(isNotNull(value)) AS cnt
@@ -138,10 +144,10 @@ def fetch_meta_with_presence(routes, directions, sensor_type_db, start_day, end_
             WHERE toString(sensor_type) = {sensor_type:String}
               AND day >= {start_day:Date} AND day <= {end_day:Date}
             GROUP BY sensor_id
-        ) AS d USING (sensor_id)
-        WHERE m.route IN {routes:Array(String)}
-          AND m.direction IN {directions:Array(String)}
-        ORDER BY m.sensor_id
+        ) AS d ON d.sensor_id = m.name
+        WHERE arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {routes:Array(String)})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {directions:Array(String)})
+        ORDER BY m.name
     """
     return ch().query_df(
         sql,
@@ -162,12 +168,12 @@ def fetch_ts_joined(sensor_id, routes, directions, sensor_type_db, start_dt, end
             t AS ts,
             avg(r.value) AS value
         FROM raw_30s AS r
-        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+        INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
         WHERE r.sensor_id = {{sensor_id:String}}
           AND toString(r.sensor_type) = {{sensor_type:String}}
           AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
-          AND m.route IN {{routes:Array(String)}}
-          AND m.direction IN {{directions:Array(String)}}
+          AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {{routes:Array(String)}})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {{directions:Array(String)}})
         GROUP BY ts
         ORDER BY ts
     """
@@ -188,12 +194,12 @@ def fetch_raw_count(sensor_id, routes, directions, sensor_type_db, start_dt, end
     sql = """
         SELECT count() AS raw_rows
         FROM raw_30s AS r
-        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+        INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
         WHERE r.sensor_id = {sensor_id:String}
           AND toString(r.sensor_type) = {sensor_type:String}
           AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-          AND m.route IN {routes:Array(String)}
-          AND m.direction IN {directions:Array(String)}
+          AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {routes:Array(String)})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {directions:Array(String)})
     """
     df = ch().query_df(
         sql,
@@ -218,12 +224,12 @@ def fetch_raw_counts(sensor_id, routes, directions, sensor_type_db, start_dt, en
             count() AS raw_rows,
             countIf(isNotNull(r.value)) AS nonnull_rows
         FROM raw_30s AS r
-        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+        INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
         WHERE r.sensor_id = {sensor_id:String}
           AND toString(r.sensor_type) = {sensor_type:String}
           AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
-          AND m.route IN {routes:Array(String)}
-          AND m.direction IN {directions:Array(String)}
+          AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {routes:Array(String)})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {directions:Array(String)})
     """
     df = ch().query_df(
         sql,
@@ -274,12 +280,12 @@ def fetch_con_zero_vol(sensor_id, routes, directions, sensor_type_db, start_dt, 
                         (ifNull(r.value, 1) = 0) AS is_zero,
                         lagInFrame((ifNull(r.value, 1) = 0), 1, 0) OVER (PARTITION BY toDate(r.ts) ORDER BY r.ts) AS prev_is_zero
                     FROM raw_30s AS r
-                    INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                    INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
                     WHERE r.sensor_id = {{sensor_id:String}}
                       AND toString(r.sensor_type) = {{sensor_type:String}}
                       AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
-                      AND m.route IN {{routes:Array(String)}}
-                      AND m.direction IN {{directions:Array(String)}}
+                      AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {{routes:Array(String)}})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {{directions:Array(String)}})
                 )
             )
             WHERE is_zero
@@ -360,13 +366,13 @@ def fetch_vol_on_low_occ(
                     anyIf(r.value, toString(r.sensor_type) = {vol_type:String}) AS vol,
                     anyIf(r.value, toString(r.sensor_type) = {occ_type:String}) AS occ
                 FROM raw_30s AS r
-                INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
                 WHERE r.sensor_id = {sensor_id:String}
                   AND r.day >= {start_day:Date} AND r.day <= {end_day:Date}
                   AND r.ts >= {start:DateTime} AND r.ts <= {end:DateTime}
                   AND (toString(r.sensor_type) = {vol_type:String} OR toString(r.sensor_type) = {occ_type:String})
-                  AND m.route IN {routes:Array(String)}
-                  AND m.direction IN {directions:Array(String)}
+                  AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {routes:Array(String)})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {directions:Array(String)})
                 GROUP BY day, ts
             )
             GROUP BY day
@@ -425,6 +431,9 @@ def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end
     if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
         return fetch_metric_daily_value("constVol", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constVol
         FROM
@@ -462,13 +471,13 @@ def fetch_const_vol(sensor_id, routes, directions, sensor_type_db, start_dt, end
                             lagInFrame(ifNull(r.value, -1), 1, -1)
                                 OVER (PARTITION BY r.day ORDER BY r.ts) AS prev_val
                         FROM raw_30s AS r
-                        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                        INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
                         WHERE r.sensor_id = {{sensor_id:String}}
                           AND toString(r.sensor_type) = {{sensor_type:String}}
                           AND r.day >= {{start_day:Date}} AND r.day <= {{end_day:Date}}
                           AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
-                          AND m.route IN {{routes:Array(String)}}
-                          AND m.direction IN {{directions:Array(String)}}
+                          AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {{routes:Array(String)}})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {{directions:Array(String)}})
                     ) AS r
                 )
             )
@@ -509,6 +518,9 @@ def fetch_const_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end
     if min_run_slots == PRECOMPUTED_MIN_RUN_SLOTS:
         return fetch_metric_daily_value("constOcc", sensor_id, start_dt, end_dt, str(sensor_type_db))
 
+    start_day = start_dt.date()
+    end_day = end_dt.date()
+
     sql = f"""
         SELECT ifNull(maxIf(run_len, run_len >= {min_run_slots}), 0) AS constOcc
         FROM
@@ -546,13 +558,13 @@ def fetch_const_occ(sensor_id, routes, directions, sensor_type_db, start_dt, end
                             lagInFrame(ifNull(r.value, -1), 1, -1)
                                 OVER (PARTITION BY r.day ORDER BY r.ts) AS prev_val
                         FROM raw_30s AS r
-                        INNER JOIN detector_meta AS m ON r.sensor_id = m.sensor_id
+                        INNER JOIN detectors_meta_info AS m ON r.sensor_id = m.name
                         WHERE r.sensor_id = {{sensor_id:String}}
                           AND toString(r.sensor_type) = {{sensor_type:String}}
                           AND r.day >= {{start_day:Date}} AND r.day <= {{end_day:Date}}
                           AND r.ts >= {{start:DateTime}} AND r.ts <= {{end:DateTime}}
-                          AND m.route IN {{routes:Array(String)}}
-                          AND m.direction IN {{directions:Array(String)}}
+                          AND arrayExists(route -> positionCaseInsensitiveUTF8(m.location, route) > 0, {{routes:Array(String)}})
+          AND arrayExists(direction -> positionCaseInsensitiveUTF8(m.location, direction) > 0, {{directions:Array(String)}})
                     ) AS r
                 )
             )
