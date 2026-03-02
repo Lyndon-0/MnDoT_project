@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time as dtime
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -33,9 +34,15 @@ from .ui import (
     build_ts_figure,
     empty_map_figure,
 )
+from VBS.export_flow_matrix import export_flow_matrix
+from VBS.vbs import run as run_vbs
 
 
 def register_callbacks(app, cache) -> None:
+    vbs_network_path = Path("data/network.dat")
+    vbs_detectors_path = Path("data/detectors.csv")
+    vbs_flow_dir = Path("/tmp")
+
     def normalize_corridor(value: str) -> str:
         return " ".join(str(value).replace(",", " ").split())
 
@@ -507,6 +514,50 @@ def register_callbacks(app, cache) -> None:
             else:
                 neg_vol_cnt = int(cached_neg)
 
+            vbs_key = f"vbs_probs:{start_date:%Y%m%d}:{end_date:%Y%m%d}"
+            cached_vbs = cache.get(vbs_key)
+            if cached_vbs is None:
+                flow_path = vbs_flow_dir / f"flow_matrix_{start_date:%Y%m%d}_{end_date:%Y%m%d}.txt"
+                export_flow_matrix(
+                    start_date,
+                    end_date,
+                    network_path=vbs_network_path,
+                    output_path=flow_path,
+                    detectors_path=vbs_detectors_path,
+                )
+                vbs_probabilities = run_vbs(flow_path=str(flow_path), network_path=str(vbs_network_path))
+                cache.set(vbs_key, vbs_probabilities)
+                vbs_source = "computed"
+            else:
+                vbs_probabilities = cached_vbs
+                vbs_source = "cached"
+
+            vbs_lookup = {}
+            for key, value in vbs_probabilities.items():
+                key_text = str(key).strip()
+                if not key_text:
+                    continue
+                vbs_lookup[key_text] = value
+                vbs_lookup[key_text.upper()] = value
+
+            candidate_keys = []
+            for raw_key in (sensor_id, sensor_station):
+                key_text = str(raw_key).strip()
+                if not key_text:
+                    continue
+                candidate_keys.append(key_text)
+                candidate_keys.append(key_text.upper())
+
+            matched_vbs_key = next((k for k in candidate_keys if k in vbs_lookup), None)
+            vbs_probability = vbs_lookup.get(matched_vbs_key)
+            vbs_debug = (
+                f"VBS source={vbs_source} | "
+                f"selected={sensor_id}/{sensor_station} | "
+                f"matched_key={matched_vbs_key} | "
+                f"probability={vbs_probability} | "
+                f"sensor_probabilities={vbs_probabilities}"
+            )
+
         except Exception as e:
             return (
                 f"Detector {sensor_id}",
@@ -586,8 +637,9 @@ def register_callbacks(app, cache) -> None:
         )
 
         debug = (
-            f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
-            f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null)"
+            # f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
+            # f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null) | "
+            # f"{vbs_debug}"
         )
 
         if df_ts.empty:
@@ -642,18 +694,34 @@ def register_callbacks(app, cache) -> None:
         high_occ_line = f"highOcc: {high_occ} slots/day (max over range, c30; occ>35)"
         zvol_on_occ_line = f"zvolOnOcc: {zvol_on_occ} slots/day (max over range, v30==0 & c30>0)"
         vol_on_low_occ_line = f"volOnLowOcc: {vol_on_low_occ} slots/day (max over range, v30>1 & c30<=0.2)"
+        healthy_color = "#16A34A"
+        alert_color = "#DC2626"
+
+        def metric_style(metric_key: str) -> dict[str, str]:
+            color = alert_color if metric_values[metric_key] > thresholds[metric_key] else healthy_color
+            return {"color": color, "fontWeight": "600"}
+
+        if vbs_probability is not None:
+            vbs_value = float(vbs_probability)
+            vbs_line = f"VBS probability: {vbs_value}"
+            vbs_style = {"color": alert_color if vbs_value > 0.5 else healthy_color, "fontWeight": "600"}
+        else:
+            vbs_line = "VBS probability: N/A"
+            vbs_style = {"color": healthy_color, "fontWeight": "600"}
+
         metrics = [
-            html.Div(con_zero_line),
-            html.Div(neg_line),
-            html.Div(over_line),
-            html.Div(const_line),
-            html.Div(con_occ_line),
-            html.Div(const_occ_line),
-            html.Div(neg_occ_line),
-            html.Div(lock_on_line),
-            html.Div(high_occ_line),
-            html.Div(zvol_on_occ_line),
-            html.Div(vol_on_low_occ_line),
+            html.Div(con_zero_line, style=metric_style("conZeroVol")),
+            html.Div(neg_line, style=metric_style("negVolCnt")),
+            html.Div(over_line, style=metric_style("overCnt")),
+            html.Div(const_line, style=metric_style("constVol")),
+            html.Div(con_occ_line, style=metric_style("conZeroOcc")),
+            html.Div(const_occ_line, style=metric_style("constOcc")),
+            html.Div(neg_occ_line, style=metric_style("negOccCnt")),
+            html.Div(lock_on_line, style=metric_style("occLockOn")),
+            html.Div(high_occ_line, style=metric_style("highOcc")),
+            html.Div(zvol_on_occ_line, style=metric_style("zvolOnOcc")),
+            html.Div(vol_on_low_occ_line, style=metric_style("volOnLowOcc")),
+            html.Div(vbs_line, style=vbs_style),
         ]
 
         return f"Detector {sensor_id}", meta_line, status_component, debug, False, "", fig, metrics

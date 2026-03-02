@@ -140,4 +140,4 @@ register_callbacks(app, cache)
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8053, debug=True)
+    app.run(host="127.0.0.1", port=8053, debug=False)
