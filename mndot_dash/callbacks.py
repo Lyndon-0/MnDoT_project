@@ -516,6 +516,7 @@ def register_callbacks(app, cache) -> None:
 
             vbs_key = f"vbs_probs:{start_date:%Y%m%d}:{end_date:%Y%m%d}"
             cached_vbs = cache.get(vbs_key)
+            cached_vbs = None
             if cached_vbs is None:
                 flow_path = vbs_flow_dir / f"flow_matrix_{start_date:%Y%m%d}_{end_date:%Y%m%d}.txt"
                 export_flow_matrix(
@@ -637,9 +638,9 @@ def register_callbacks(app, cache) -> None:
         )
 
         debug = (
-            f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
-            f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null) | "
-            f"{vbs_debug}"
+            # f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
+            # f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null) | "
+            # f"{vbs_debug}"
         )
 
         if df_ts.empty:

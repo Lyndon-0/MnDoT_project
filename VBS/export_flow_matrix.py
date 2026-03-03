@@ -576,6 +576,16 @@ def export_flow_matrix(
     network_df["dest"] = network_df["dest"].astype(str).str.strip()
     node_values = network_df[value_node_col].astype(str).str.strip()
 
+    # For edges with exactly one inferred endpoint, use the non-inferred endpoint
+    # as the flow source. This avoids zeroing rows when B/I nodes do not map to
+    # direct sensor ids (for example, B23298 -> 2605 should use 2605).
+    origin_is_inferred = network_df["origin"].str.startswith(("B", "I"))
+    dest_is_inferred = network_df["dest"].str.startswith(("B", "I"))
+    one_inferred = origin_is_inferred ^ dest_is_inferred
+    if one_inferred.any():
+        non_inferred_end = network_df["origin"].where(~origin_is_inferred, network_df["dest"])
+        node_values = node_values.where(~one_inferred, non_inferred_end)
+
     detectors_local = detectors_df if detectors_df is not None else pd.read_csv(detectors_path, dtype=str)
     rules = load_virtual_sensor_rules(virtual_sensors_path)
     rules.update(load_inferred_rules(inferred_rules, inferred_rules_path))
