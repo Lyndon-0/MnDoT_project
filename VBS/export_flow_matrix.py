@@ -225,11 +225,13 @@ def sensor_vehicle_count(
 
 def _normalize_operation(raw: str) -> str:
     op = str(raw).strip().lower()
-    if op in {"addition", "add", "+"}:
+    if not op:
+        return "identity"
+    if op in {"addition", "add", "+", "plus", "sum"}:
         return "addition"
-    if op in {"subtraction", "sub", "subtract", "-"}:
+    if op in {"subtraction", "sub", "subtract", "-", "minus"}:
         return "subtraction"
-    if op in {"identity", "copy", "alias", "pass"}:
+    if op in {"identity", "copy", "alias", "pass", "none"}:
         return "identity"
     raise ValueError(f"Unsupported inferred-node operation: {raw!r}")
 
@@ -246,6 +248,26 @@ def _normalize_rule(node: str, spec: Any) -> dict[str, str | None]:
         "right_node": str(right).strip() if right is not None else None,
         "operation": op,
     }
+
+
+def _clean_token(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "null", "<null>", "<na>"}:
+        return ""
+    return text
+
+
+def _normalize_node_token(value: Any) -> str:
+    text = _clean_token(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d+\.0+", text):
+        return str(int(float(text)))
+    return text
 
 
 def load_inferred_rules(
@@ -277,6 +299,115 @@ def load_inferred_rules(
         if node:
             normalized[node] = _normalize_rule(node, spec)
     return normalized
+
+
+def load_virtual_sensor_rules(
+    virtual_sensors_path: Path | None = Path("data/virtual_sensors.csv"),
+) -> dict[str, dict[str, str | None]]:
+    if virtual_sensors_path is None:
+        return {}
+
+    path = Path(virtual_sensors_path)
+    if not path.exists():
+        return {}
+
+    df = pd.read_csv(path, dtype=str)
+    if df.empty:
+        return {}
+
+    col_map = {str(col).strip().lower(): col for col in df.columns}
+    left_col = col_map.get("inferred_left_pkey")
+    right_col = col_map.get("inferred_right_pkey")
+    op_col = col_map.get("inferred_operator")
+
+    missing = []
+    if col_map.get("name") is None:
+        missing.append("name")
+    if left_col is None:
+        missing.append("inferred_left_pkey")
+    if right_col is None:
+        missing.append("inferred_right_pkey")
+    if op_col is None:
+        missing.append("inferred_operator")
+    if missing:
+        raise ValueError(
+            f"{path} is missing required virtual-sensor columns: {', '.join(missing)}"
+        )
+
+    rules: dict[str, dict[str, str | None]] = {}
+
+    def row_value(row: pd.Series, key: str) -> str:
+        col = col_map.get(key)
+        if col is None:
+            return ""
+        return _normalize_node_token(row[col])
+
+    def infer_node_id(row: pd.Series) -> str:
+        # `name` is the canonical inferred-node id column in virtual_sensors.csv.
+        for key in ("name", "station", "node", "sensor_id"):
+            token = row_value(row, key)
+            if not token:
+                continue
+            if token.startswith(("B", "I")):
+                return token
+            m_vbs = re.fullmatch(r"(?i)VBS(\d+)", token)
+            if m_vbs:
+                return f"B{m_vbs.group(1)}"
+
+        pkey = (
+            row_value(row, "pkey")
+            or row_value(row, "sensor_pkey")
+            or row_value(row, "virtual_sensor_pkey")
+        )
+        if not pkey:
+            return ""
+        if pkey.startswith(("B", "I")):
+            return pkey
+
+        sensor_kind = _clean_token(
+            row[col_map["sensor_kind"]] if col_map.get("sensor_kind") else ""
+        ).lower()
+        if pkey[0].isdigit():
+            if sensor_kind.startswith("inferred"):
+                return f"I{pkey}"
+            if sensor_kind.startswith("vbs"):
+                return f"B{pkey}"
+        return ""
+
+    for _, row in df.iterrows():
+        node = infer_node_id(row)
+        if not node or not node.startswith(("B", "I")):
+            continue
+
+        left_node = _normalize_node_token(row[left_col])
+        right_node = _normalize_node_token(row[right_col])
+        sensor_kind = _clean_token(
+            row[col_map["sensor_kind"]] if col_map.get("sensor_kind") else ""
+        ).lower()
+        if not left_node and not right_node:
+            # For VBS rows without inferred fields, fall back to the explicit virtual sensor id
+            # (e.g. VBS23257) so B-nodes can still resolve via sensor_vehicle_count.
+            if sensor_kind.startswith("vbs"):
+                for key in ("name", "station", "sensor_id"):
+                    token = row_value(row, key)
+                    if token and token != node and not token.startswith(("B", "I")):
+                        left_node = token
+                        break
+            if not left_node:
+                continue
+
+        op_raw = _clean_token(row[op_col]) or ("identity" if not right_node else "subtraction")
+        op = _normalize_operation(op_raw)
+        if op != "identity" and not right_node:
+            op = "identity"
+
+        rules[node] = {
+            "left_node": left_node or None,
+            "right_node": right_node or None,
+            "operation": op,
+        }
+
+    return rules
 
 
 def _infer_rules_from_network(
@@ -343,13 +474,15 @@ def resolve_inferred_node(
     ch_table: str = DEFAULT_TABLE,
     ch_database: str | None = None,
     client=None,
+    virtual_sensors_path: Path | None = Path("data/virtual_sensors.csv"),
     inferred_rules: Mapping[str, Any] | None = None,
     inferred_rules_path: Path | None = None,
 ) -> pd.DataFrame:
     start_dt, end_dt = normalize_time_range(start_time, end_time)
     bucket = bucket_seconds or choose_bucket_seconds(start_dt, end_dt, max_timesteps=max_timesteps)
     bucket_index = _build_bucket_index(start_dt, end_dt, bucket)
-    rules = load_inferred_rules(inferred_rules, inferred_rules_path)
+    rules = load_virtual_sensor_rules(virtual_sensors_path)
+    rules.update(load_inferred_rules(inferred_rules, inferred_rules_path))
     cache: dict[str, pd.Series] = {}
 
     def resolve_node(node: str) -> pd.Series:
@@ -358,10 +491,22 @@ def resolve_inferred_node(
             return cache[node_text]
 
         if node_text.startswith(("B", "I")):
-            rule = rules[node_text]
+            rule = rules.get(node_text)
+            if rule is None:
+                raise KeyError(
+                    f"Missing inferred-node rule for {node_text!r}. "
+                    f"Add it to {virtual_sensors_path} with inferred_left_pkey, "
+                    f"inferred_right_pkey, inferred_operator."
+                )
             op = _normalize_operation(str(rule.get("operation", "identity")))
             left = rule.get("left_node")
             right = rule.get("right_node")
+            if op == "identity" and not left:
+                raise ValueError(f"Inferred-node rule for {node_text!r} has identity op but missing left_node.")
+            if op in {"addition", "subtraction"} and (not left or not right):
+                raise ValueError(
+                    f"Inferred-node rule for {node_text!r} has {op} op but missing left/right node."
+                )
 
             if op == "identity":
                 series = resolve_node(str(left))
@@ -417,6 +562,7 @@ def export_flow_matrix(
     ch_table: str = DEFAULT_TABLE,
     ch_database: str | None = None,
     client=None,
+    virtual_sensors_path: Path | None = Path("data/virtual_sensors.csv"),
     inferred_rules: Mapping[str, Any] | None = None,
     inferred_rules_path: Path | None = None,
     auto_infer_rules: bool = True,
@@ -431,7 +577,8 @@ def export_flow_matrix(
     node_values = network_df[value_node_col].astype(str).str.strip()
 
     detectors_local = detectors_df if detectors_df is not None else pd.read_csv(detectors_path, dtype=str)
-    rules = load_inferred_rules(inferred_rules, inferred_rules_path)
+    rules = load_virtual_sensor_rules(virtual_sensors_path)
+    rules.update(load_inferred_rules(inferred_rules, inferred_rules_path))
     if auto_infer_rules:
         rules = _infer_rules_from_network(network_df, existing_rules=rules)
 
@@ -443,10 +590,22 @@ def export_flow_matrix(
             return cache[node_text]
 
         if node_text.startswith(("B", "I")):
-            rule = rules[node_text]
+            rule = rules.get(node_text)
+            if rule is None:
+                raise KeyError(
+                    f"Missing inferred-node rule for {node_text!r}. "
+                    f"Add it to {virtual_sensors_path} with inferred_left_pkey, "
+                    f"inferred_right_pkey, inferred_operator."
+                )
             op = _normalize_operation(str(rule.get("operation", "identity")))
             left = rule.get("left_node")
             right = rule.get("right_node")
+            if op == "identity" and not left:
+                raise ValueError(f"Inferred-node rule for {node_text!r} has identity op but missing left_node.")
+            if op in {"addition", "subtraction"} and (not left or not right):
+                raise ValueError(
+                    f"Inferred-node rule for {node_text!r} has {op} op but missing left/right node."
+                )
 
             if op == "identity":
                 series = resolve_node(str(left))
@@ -497,6 +656,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--value-node-col", default="origin", choices=["origin", "dest"])
     parser.add_argument("--table", default=DEFAULT_TABLE)
     parser.add_argument("--database", default=None)
+    parser.add_argument("--virtual-sensors-path", type=Path, default=Path("data/virtual_sensors.csv"))
     parser.add_argument("--inferred-rules-path", type=Path, default=None)
     parser.add_argument(
         "--disable-auto-infer-rules",
@@ -520,6 +680,7 @@ def main() -> None:
         value_node_col=args.value_node_col,
         ch_table=args.table,
         ch_database=args.database,
+        virtual_sensors_path=args.virtual_sensors_path,
         inferred_rules_path=args.inferred_rules_path,
         auto_infer_rules=not args.disable_auto_infer_rules,
     )

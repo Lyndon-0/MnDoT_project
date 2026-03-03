@@ -637,9 +637,9 @@ def register_callbacks(app, cache) -> None:
         )
 
         debug = (
-            # f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
-            # f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null) | "
-            # f"{vbs_debug}"
+            f"Debug: raw rows matching filters = {raw_rows:,} ({nonnull_raw_rows:,} non-null) | "
+            f"chart points returned (aggregated) = {ts_points:,} ({ts_points_nonnull:,} non-null) | "
+            f"{vbs_debug}"
         )
 
         if df_ts.empty:
@@ -668,60 +668,136 @@ def register_callbacks(app, cache) -> None:
 
         fig = build_ts_figure(df_ts, sensor_type_db)
         if con_zero_vol <= 0:
-            con_zero_line = "conZeroVol: 0 (no ≥10 minute all-zero run, v30)"
+            con_zero_value = "0 slots (no ≥10 minute all-zero run, v30)"
         else:
-            con_zero_line = f"conZeroVol: {con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
+            con_zero_value = f"{con_zero_vol} slots ({con_zero_vol / 2:.1f} minutes, v30)"
 
-        neg_line = f"negVolCnt: {neg_vol_cnt} slots/day (max over range, v30)"
-        over_line = f"overCnt: {over_cnt} slots/day (max over range, v30; 25<vol<128)"
+        neg_value = f"{neg_vol_cnt} slots/day (max over range, v30)"
+        over_value = f"{over_cnt} slots/day (max over range, v30; 25<vol<128)"
         if const_vol <= 0:
-            const_line = "constVol: 0 (no ≥10 minute constant run, v30; 0<vol<128)"
+            const_value = "0 slots (no ≥10 minute constant run, v30; 0<vol<128)"
         else:
-            const_line = f"constVol: {const_vol} slots ({const_vol / 2:.1f} minutes, v30; 0<vol<128)"
+            const_value = f"{const_vol} slots ({const_vol / 2:.1f} minutes, v30; 0<vol<128)"
 
         if con_zero_occ <= 0:
-            con_occ_line = "conZeroOcc: 0 (no ≥10 minute all-zero run, c30)"
+            con_occ_value = "0 slots (no ≥10 minute all-zero run, c30)"
         else:
-            con_occ_line = f"conZeroOcc: {con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
+            con_occ_value = f"{con_zero_occ} slots ({con_zero_occ / 2:.1f} minutes, c30)"
 
         if const_occ <= 0:
-            const_occ_line = "constOcc: 0 (no ≥10 minute constant run, c30; 0.2<occ<100)"
+            const_occ_value = "0 slots (no ≥10 minute constant run, c30; 0.2<occ<100)"
         else:
-            const_occ_line = f"constOcc: {const_occ} slots ({const_occ / 2:.1f} minutes, c30; 0.2<occ<100)"
+            const_occ_value = f"{const_occ} slots ({const_occ / 2:.1f} minutes, c30; 0.2<occ<100)"
 
-        neg_occ_line = f"negOccCnt: {neg_occ_cnt} slots/day (max over range, c30)"
-        lock_on_line = f"occLockOn: {occ_lock_on} slots/day (max over range, c30)"
-        high_occ_line = f"highOcc: {high_occ} slots/day (max over range, c30; occ>35)"
-        zvol_on_occ_line = f"zvolOnOcc: {zvol_on_occ} slots/day (max over range, v30==0 & c30>0)"
-        vol_on_low_occ_line = f"volOnLowOcc: {vol_on_low_occ} slots/day (max over range, v30>1 & c30<=0.2)"
+        neg_occ_value = f"{neg_occ_cnt} slots/day (max over range, c30)"
+        lock_on_value = f"{occ_lock_on} slots/day (max over range, c30)"
+        high_occ_value = f"{high_occ} slots/day (max over range, c30; occ>35)"
+        zvol_on_occ_value = f"{zvol_on_occ} slots/day (max over range, v30==0 & c30>0)"
+        vol_on_low_occ_value = f"{vol_on_low_occ} slots/day (max over range, v30>1 & c30<=0.2)"
         healthy_color = "#16A34A"
         alert_color = "#DC2626"
+        metric_descriptions = {
+            "conZeroVol": "Longest all-zero run in 30-second volume data (v30).",
+            "negVolCnt": "Maximum daily count of negative volume readings in v30.",
+            "overCnt": "Maximum daily count of high-but-valid volume readings (25<vol<128) in v30.",
+            "constVol": "Longest constant non-zero run in v30 where 0<vol<128.",
+            "conZeroOcc": "Longest all-zero run in 30-second occupancy data (c30).",
+            "constOcc": "Longest constant occupancy run in c30 where 0.2<occ<100.",
+            "negOccCnt": "Maximum daily count of negative occupancy readings in c30.",
+            "occLockOn": "Maximum daily count of lock-on occupancy behavior in c30.",
+            "highOcc": "Maximum daily count of very high occupancy readings (occ>35) in c30.",
+            "zvolOnOcc": "Maximum daily count where v30==0 while c30>0.",
+            "volOnLowOcc": "Maximum daily count where v30>1 while c30<=0.2.",
+        }
+        metric_value_display = {
+            "conZeroVol": con_zero_value,
+            "negVolCnt": neg_value,
+            "overCnt": over_value,
+            "constVol": const_value,
+            "conZeroOcc": con_occ_value,
+            "constOcc": const_occ_value,
+            "negOccCnt": neg_occ_value,
+            "occLockOn": lock_on_value,
+            "highOcc": high_occ_value,
+            "zvolOnOcc": zvol_on_occ_value,
+            "volOnLowOcc": vol_on_low_occ_value,
+        }
+        ordered_metric_keys = [
+            "conZeroVol",
+            "negVolCnt",
+            "overCnt",
+            "constVol",
+            "conZeroOcc",
+            "constOcc",
+            "negOccCnt",
+            "occLockOn",
+            "highOcc",
+            "zvolOnOcc",
+            "volOnLowOcc",
+        ]
 
         def metric_style(metric_key: str) -> dict[str, str]:
             color = alert_color if metric_values[metric_key] > thresholds[metric_key] else healthy_color
             return {"color": color, "fontWeight": "600"}
 
+        def fixed_metric_row(metric_key: str):
+            row_style = metric_style(metric_key)
+            return html.Tr(
+                [
+                    html.Td(
+                        html.Span(
+                            metric_key,
+                            title=metric_descriptions[metric_key],
+                            style={
+                                "textDecoration": "underline dotted",
+                                "cursor": "help",
+                                "color": row_style["color"],
+                                "fontWeight": row_style["fontWeight"],
+                            },
+                        )
+                    ),
+                    html.Td(metric_value_display[metric_key], style=row_style),
+                ]
+            )
+
         if vbs_probability is not None:
             vbs_value = float(vbs_probability)
-            vbs_line = f"VBS probability: {vbs_value}"
+            vbs_value_text = f"{vbs_value:.6f}"
             vbs_style = {"color": alert_color if vbs_value > 0.5 else healthy_color, "fontWeight": "600"}
         else:
-            vbs_line = "VBS probability: N/A"
+            vbs_value_text = "N/A"
             vbs_style = {"color": healthy_color, "fontWeight": "600"}
 
-        metrics = [
-            html.Div(con_zero_line, style=metric_style("conZeroVol")),
-            html.Div(neg_line, style=metric_style("negVolCnt")),
-            html.Div(over_line, style=metric_style("overCnt")),
-            html.Div(const_line, style=metric_style("constVol")),
-            html.Div(con_occ_line, style=metric_style("conZeroOcc")),
-            html.Div(const_occ_line, style=metric_style("constOcc")),
-            html.Div(neg_occ_line, style=metric_style("negOccCnt")),
-            html.Div(lock_on_line, style=metric_style("occLockOn")),
-            html.Div(high_occ_line, style=metric_style("highOcc")),
-            html.Div(zvol_on_occ_line, style=metric_style("zvolOnOcc")),
-            html.Div(vol_on_low_occ_line, style=metric_style("volOnLowOcc")),
-            html.Div(vbs_line, style=vbs_style),
-        ]
+        metrics = html.Table(
+            [
+                html.Thead(
+                    html.Tr(
+                        [
+                            html.Th("Metric"),
+                            html.Th("Value"),
+                        ]
+                    )
+                ),
+                html.Tbody(
+                    [fixed_metric_row(metric_key) for metric_key in ordered_metric_keys]
+                    + [
+                        html.Tr(
+                            [
+                                html.Td(
+                                    html.Span(
+                                        "VBS probability",
+                                        title="Estimated sensor-error probability from VBS. Highlighted red when > 0.5.",
+                                        style={"textDecoration": "underline dotted", "cursor": "help"},
+                                    )
+                                ),
+                                html.Td(vbs_value_text, style=vbs_style),
+                            ]
+                        )
+                    ]
+                ),
+            ],
+            className="table table-sm table-striped",
+            style={"marginBottom": "0"},
+        )
 
         return f"Detector {sensor_id}", meta_line, status_component, debug, False, "", fig, metrics
